@@ -28,16 +28,17 @@ RUN apt-get update \
  && apt-get install -y libpng-dev libonig-dev libxml2-dev zip unzip git \
  && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
-# Copy PHP deps and front-end build into webroot
 WORKDIR /var/www/html
+
+# Copy in vendor and built front-end assets
 COPY --from=composer-builder /app/vendor ./vendor
 COPY --from=frontend-builder /app/public/build ./public/build
+
+# Copy the rest of your application
 COPY . .
 
-# Generate app key & fix permissions
-RUN php artisan key:generate \
- && chown -R www-data:www-data /var/www/html
+# Fix permissions (do NOT generate APP_KEY here)
+RUN chown -R www-data:www-data /var/www/html
 
-# Expose HTTP port and launch Apache
 EXPOSE 80
 CMD ["apache2-foreground"]
