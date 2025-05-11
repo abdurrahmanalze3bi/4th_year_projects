@@ -6,14 +6,23 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# 2) Install PHP dependencies with Composer
+# 2) Install PHP dependencies with Composer (no scripts yet)
 FROM composer:2 AS composer-builder
 WORKDIR /app
 COPY composer.json composer.lock ./
-RUN composer install --no-dev --optimize-autoloader
+
+# Install PHP deps without running any scripts
+RUN composer install --no-dev --optimize-autoloader --no-scripts
+
+# 2.1) Copy in the rest of your application so artisan can discover packages
+COPY . .
+
+# 2.2) Manually run the post-autoload scripts (package discovery, etc.)
+RUN composer run-script post-autoload-dump
 
 # 3) Final image: PHP + Apache + your built code
 FROM php:8.3-apache
+
 # Install system libs + PHP extensions
 RUN apt-get update \
  && apt-get install -y libpng-dev libonig-dev libxml2-dev zip unzip git \
