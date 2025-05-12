@@ -14,15 +14,27 @@ class UserRepository implements UserRepositoryInterface {
         $this->model = $user;
     }
 
+    public function findByGoogleId($googleId)
+    {
+        return User::where('google_id', $googleId)->first();
+    }
+
+    public function updateGoogleId($userId, $googleId)
+    {
+        return User::where('id', $userId)->update(['google_id' => $googleId]);
+    }
+
     public function createUser(array $data)
     {
-        return $this->model->create([
+        return User::create([
             'first_name' => $data['first_name'],
             'last_name' => $data['last_name'],
             'email' => $data['email'],
-            'password' => bcrypt($data['password']),
-            'gender' => $data['gender'],
-            'address' => $data['address'],
+            'password' => $data['password'],
+            'gender' => $data['gender'] ?? null,
+            'address' => $data['address'] ?? null,
+            'google_id' => $data['google_id'],
+            'avatar' => $data['avatar'],
             'status' => 1
         ]);
     }

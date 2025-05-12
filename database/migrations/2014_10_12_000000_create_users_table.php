@@ -11,19 +11,20 @@ return new class extends Migration
      */
     public function up(): void
     {
-
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('first_name');
             $table->string('last_name');
             $table->string('email')->unique();
-            $table->string('password');
-            $table->enum('gender', ['M', 'F']);
+            $table->string('password')->nullable(); // Changed to nullable
+            $table->enum('gender', ['M', 'F'])->nullable(); // Made nullable
             $table->enum('address', [
                 'دمشق', 'درعا', 'القنيطرة', 'السويداء', 'ريف دمشق',
                 'حمص', 'حماة', 'اللاذقية', 'طرطوس', 'حلب',
                 'ادلب', 'الحسكة', 'الرقة', 'دير الزور'
-            ]);
+            ])->nullable(); // Made nullable
+            $table->string('google_id')->nullable()->unique(); // Added
+            $table->string('avatar')->nullable(); // Added
             $table->tinyInteger('status')->default(1);
             $table->timestamps();
         });

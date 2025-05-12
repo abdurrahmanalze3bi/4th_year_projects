@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\API\Auth\GoogleController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\SignupController;
@@ -32,3 +33,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
     Route::post('/logout', LogoutController::class);
 });
+
+// routes/api.php
+

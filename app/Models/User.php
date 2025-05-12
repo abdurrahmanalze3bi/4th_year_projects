@@ -24,14 +24,17 @@ class User extends Authenticatable
         'last_name',
         'email',
         'password',
-        'gender',
-        'address',
-        'status'
+        'gender',       // Keep existing
+        'address',      // Keep existing
+        'google_id',    // Added
+        'avatar',       // Added
+        'status'        // Keep existing
     ];
 
     protected $hidden = [
         'password',
         'remember_token',
+        'google_id'     // Added to hidden
     ];
     /**
      * The attributes that should be hidden for serialization.

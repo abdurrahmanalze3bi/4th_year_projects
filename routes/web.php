@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ResetPasswordController;
 use Illuminate\Support\Facades\Route;
 
@@ -18,3 +19,7 @@ Route::get('/', function () {
     return view('welcome');
 });
 
+Route::prefix('auth/google')->group(function () {
+    Route::get('/redirect', [GoogleController::class, 'redirect']);
+    Route::get('/callback', [GoogleController::class, 'callback']);
+});
