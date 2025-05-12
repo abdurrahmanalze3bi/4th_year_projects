@@ -33,8 +33,8 @@ class UserRepository implements UserRepositoryInterface {
             'password' => $data['password'],
             'gender' => $data['gender'] ?? null,
             'address' => $data['address'] ?? null,
-            'google_id' => $data['google_id'],
-            'avatar' => $data['avatar'],
+            'google_id' => $data['google_id'] ?? null, // Handle missing key
+            'avatar' => $data['avatar'] ?? null,       // Handle missing key
             'status' => 1
         ]);
     }
