@@ -8,7 +8,7 @@ use App\Http\Controllers\API\LoginController;
 use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\ForgotPasswordController;
 use App\Http\Controllers\API\ResetPasswordController;
-
+use App\Http\Controllers\API\ProfileController;
 /*
 |--------------------------------------------------------------------------
 | API Routes
@@ -34,5 +34,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', LogoutController::class);
 });
 
+
+Route::prefix('profile')->group(function () {
+    Route::get('/{userId}', [ProfileController::class, 'show']);
+    Route::patch('/{userId}', [ProfileController::class, 'update']);
+});
 // routes/api.php
 

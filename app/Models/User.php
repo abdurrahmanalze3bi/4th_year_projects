@@ -56,4 +56,18 @@ class User extends Authenticatable
     {
         $this->notify(new CustomResetPassword($token));
     }
+    public function profile()
+    {
+        return $this->hasOne(Profile::class);
+    }
+    protected static function booted()
+    {
+        static::created(function (User $user) {
+            $user->profile()->create([
+                'full_name' => $user->first_name . ' ' . $user->last_name,
+                'address' => $user->address,
+                'gender' => $user->gender
+            ]);
+        });
+    }
 }

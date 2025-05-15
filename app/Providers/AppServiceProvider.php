@@ -3,8 +3,12 @@
 namespace App\Providers;
 
 use App\Interfaces\PasswordResetRepositoryInterface;
+use App\Interfaces\ProfileRepositoryInterface;
 use App\Interfaces\UserRepositoryInterface;
+use App\Models\User;
+use App\Observers\UserObserver;
 use App\Repositories\PasswordResetRepository;
+use App\Repositories\ProfileRepository;
 use App\Repositories\UserRepository;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
@@ -25,6 +29,11 @@ class AppServiceProvider extends ServiceProvider
             PasswordResetRepositoryInterface::class,
             PasswordResetRepository::class
         );
+        $this->app->bind(
+            ProfileRepositoryInterface::class,
+            ProfileRepository::class
+        );
+
     }
 
     /**
@@ -33,5 +42,8 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Schema::defaultStringLength(191);
+        User::observe(UserObserver::class);
     }
+
+
 }
