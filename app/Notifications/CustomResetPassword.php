@@ -9,17 +9,18 @@ use Illuminate\Notifications\Messages\MailMessage;
 class CustomResetPassword extends ResetPassword
 {
     use Queueable;
+    // app/Notifications/CustomResetPassword.php
     public function toMail($notifiable)
     {
-        $url = config('app.frontend_url') . '/reset-password?' . http_build_query([
-                'token' => $this->token,
-                'email' => $notifiable->email
-            ]);
+        $url = url(route('password.reset', [
+            'token' => $this->token,
+            'email' => $notifiable->getEmailForPasswordReset()
+        ]));
 
         return (new MailMessage)
-            ->subject('Password Reset Request')
-            ->line('Click the button below to reset your password:')
+            ->subject('Reset Password Notification')
+            ->line('You are receiving this email because we requested a password reset.')
             ->action('Reset Password', $url)
-            ->line('If you did not request this, no further action is required.');
+            ->line('This link expires in 60 minutes.');
     }
 }

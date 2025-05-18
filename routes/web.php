@@ -1,25 +1,30 @@
 <?php
 
-use App\Http\Controllers\API\Auth\GoogleController;
-use App\Http\Controllers\API\ResetPasswordController;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-
-/*
-|--------------------------------------------------------------------------
-| Web Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register web routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "web" middleware group. Make something great!
-|
-*/
+use App\Http\Controllers\API\Auth\GoogleController;
 
 Route::get('/', function () {
     return view('welcome');
 });
 
+// Google OAuth
 Route::prefix('auth/google')->group(function () {
     Route::get('/redirect', [GoogleController::class, 'redirect']);
     Route::get('/callback', [GoogleController::class, 'callback']);
 });
+Route::get('/reset-password', function (Request $request) {
+    $token = $request->query('token');
+    $email = $request->query('email');
+
+    if (!$token || !$email) {
+        return response()->view('errors.invalid-reset-link', [
+            'message' => 'Invalid password reset link'
+        ], 400);
+    }
+
+    return view('auth.reset-password', [
+        'token' => $token,
+        'email' => urldecode($email)
+    ]);
+})->name('password.reset');

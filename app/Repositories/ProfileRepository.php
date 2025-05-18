@@ -46,10 +46,17 @@ class ProfileRepository implements ProfileRepositoryInterface
         return $profile->fresh(); // Add this to get refreshed data
     }
 
+    // app/Repositories/ProfileRepository.php
+
     public function getProfileWithUser($userId)
     {
-        return $this->model->with('user')->where('user_id', $userId)->firstOrFail();
+        return $this->model
+            ->with(['user', 'comments.commenter'])
+            ->where('user_id', $userId)
+            ->firstOrFail();
     }
+
+
 
     public function createFromUser(User $user)
     {

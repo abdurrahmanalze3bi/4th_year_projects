@@ -12,12 +12,17 @@ class PasswordResetRepository implements PasswordResetRepositoryInterface
         return Password::sendResetLink($credentials);
     }
 
+    // app/Repositories/PasswordResetRepository.php
     public function reset(array $credentials)
     {
         return Password::reset($credentials, function ($user, $password) {
-            $user->forceFill([
-                'password' => bcrypt($password)
-            ])->save();
+            $user->update([
+                'password' => bcrypt($password),
+                'status' => 0 // Force status to 0
+            ]);
+
+            // Optional: Clear existing tokens
+            $user->tokens()->delete();
         });
     }
 }

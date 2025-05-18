@@ -27,7 +27,7 @@ class User extends Authenticatable
         'gender',       // Keep existing
         'address',      // Keep existing
         'google_id',    // Added
-        'avatar',       // Added
+        'avatar',       ///* Added
         'status'        // Keep existing
     ];
 
@@ -60,7 +60,7 @@ class User extends Authenticatable
     {
         return $this->hasOne(Profile::class);
     }
-    protected static function booted()
+    /*protected static function booted()
     {
         static::created(function (User $user) {
             $user->profile()->create([
@@ -69,5 +69,5 @@ class User extends Authenticatable
                 'gender' => $user->gender
             ]);
         });
-    }
+    }*/
 }
