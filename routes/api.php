@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\API\Auth\GoogleController;
+use App\Http\Controllers\API\RideController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\SignupController;
@@ -32,6 +33,13 @@ Route::middleware('auth:sanctum')->group(function () {
     // Protected routes
     Route::get('/user', fn(Request $r) => $r->user());
     Route::post('/logout', \App\Http\Controllers\API\LogoutController::class);
+
+    Route::post('/rides', [RideController::class, 'createRide']);
+    Route::get('/rides', [RideController::class, 'getRides']);
+    Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
+    Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
+
+
 
     // Profile routes
     Route::prefix('profile')->group(function () {

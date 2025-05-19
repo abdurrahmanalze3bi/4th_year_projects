@@ -60,6 +60,13 @@ class User extends Authenticatable
     {
         return $this->hasOne(Profile::class);
     }
+    public function rides() {
+        return $this->hasMany(Ride::class, 'driver_id');
+    }
+
+    public function bookings() {
+        return $this->hasMany(Booking::class);
+    }
     /*protected static function booted()
     {
         static::created(function (User $user) {

@@ -13,7 +13,11 @@ return [
     | a conventional file to locate the various service credentials.
     |
     */
-
+    'openroute' => [
+        'key' => env('OPENROUTE_KEY', ''),
+        'geocode_endpoint' => 'https://api.openrouteservice.org/geocode/search',
+        'directions_endpoint' => 'https://api.openrouteservice.org/v2/directions/driving-car'
+    ],
     'mailgun' => [
         'domain' => env('MAILGUN_DOMAIN'),
         'secret' => env('MAILGUN_SECRET'),
