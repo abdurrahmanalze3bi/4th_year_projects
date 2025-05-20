@@ -28,3 +28,9 @@ Route::get('/reset-password', function (Request $request) {
         'email' => urldecode($email)
     ]);
 })->name('password.reset');
+Route::get('/env-test', function() {
+    return [
+        'env_key' => env('OPENROUTE_API_KEY'),
+        'config_key' => config('services.openroute.api_key')
+    ];
+});

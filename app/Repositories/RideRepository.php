@@ -3,117 +3,251 @@
 namespace App\Repositories;
 
 use App\Interfaces\RideRepositoryInterface;
-use App\Interfaces\GeocodingServiceInterface;
 use App\Models\Ride;
 use App\Models\Booking;
+use App\Services\OpenRouteService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Carbon\Carbon;
 
 class RideRepository implements RideRepositoryInterface
 {
     public function __construct(
-        private GeocodingServiceInterface $geocodingService
+        private OpenRouteService $routingService
     ) {}
 
+    /**
+     * Create a new ride with geocoding and routing details.
+     *
+     * @param array $data
+     * @return Ride
+     * @throws \Exception
+     */
     public function createRide(array $data): Ride
     {
+        Log::info('RideRepository: Creating ride', [
+            'driver_id' => $data['driver_id'],
+            'pickup_address' => $data['pickup_address'],
+            'destination_address' => $data['destination_address'],
+        ]);
+
         return DB::transaction(function () use ($data) {
-            try {
-                // Convert addresses to coordinates
-                $pickup = $this->geocodingService->geocodeAddress($data['pickup_address']);
-                $destination = $this->geocodingService->geocodeAddress($data['destination_address']);
+            // 1. Geocode addresses
+            $pickup      = $this->routingService->geocodeAddress($data['pickup_address']);
+            $destination = $this->routingService->geocodeAddress($data['destination_address']);
 
-                // Get route details
-                $route = $this->geocodingService->getRouteDetails($pickup, $destination);
+            // 2. Get route summary
+            $route = $this->routingService->getRouteDetails($pickup, $destination);
 
-                return Ride::create([
-                    'driver_id' => $data['driver_id'],
-                    'pickup_address' => $data['pickup_address'],
-                    'pickup_lat' => $pickup['lat'],
-                    'pickup_lng' => $pickup['lng'],
-                    'destination_address' => $data['destination_address'],
-                    'destination_lat' => $destination['lat'],
-                    'destination_lng' => $destination['lng'],
-                    'distance' => $route['distance'],
-                    'duration' => $route['duration'],
-                    'route_geometry' => $route['geometry'],
-                    'departure_time' => $data['departure_time'],
-                    'available_seats' => $data['available_seats'],
-                    'price_per_seat' => $data['price_per_seat'],
-                    'vehicle_type' => $data['vehicle_type']
-                ]);
+            // 3. Prepare base attributes, converting ISO8601 to MySQL DATETIME format
+            $baseAttributes = [
+                'driver_id'           => $data['driver_id'],
+                'pickup_address'      => $data['pickup_address'],
+                'destination_address' => $data['destination_address'],
+                'distance'            => $route['distance'],
+                'duration'            => $route['duration'],
+                'departure_time'      => Carbon::parse($data['departure_time'])->toDateTimeString(),
+                'available_seats'     => $data['available_seats'],
+                'price_per_seat'      => $data['price_per_seat'],
+                'vehicle_type'        => $data['vehicle_type'],
+                'notes'               => $data['notes'] ?? null,
+            ];
 
-            } catch (\Exception $e) {
-                Log::error("Ride creation failed: {$e->getMessage()}");
-                throw new \Exception("Could not create ride: {$e->getMessage()}");
-            }
+            // 4. Build raw spatial expressions
+            $pickupPoint = DB::raw(sprintf(
+                "ST_GeomFromText('POINT(%F %F)', 4326)",
+                $pickup['lng'],
+                $pickup['lat']
+            ));
+            $destinationPoint = DB::raw(sprintf(
+                "ST_GeomFromText('POINT(%F %F)', 4326)",
+                $destination['lng'],
+                $destination['lat']
+            ));
+
+            // 5. Merge raw expressions into attributes
+            $attributes = array_merge(
+                $baseAttributes,
+                [
+                    'pickup_location'      => $pickupPoint,
+                    'destination_location' => $destinationPoint,
+                ]
+            );
+
+            // 6. Instantiate, set raw attributes to bypass mutators, and save
+            $ride = new Ride();
+            $ride->setRawAttributes($attributes, true);
+            $ride->save();
+
+            Log::info('RideRepository: Ride created', ['ride_id' => $ride->id]);
+            return $ride;
         });
     }
 
-// app/Repositories/RideRepository.php
-    public function getUpcomingRides(): \Illuminate\Database\Eloquent\Collection
+    /**
+     * Fetch upcoming rides.
+     *
+     * @return Collection
+     */
+    public function getUpcomingRides(): Collection
     {
-        return Ride::with('driver')
+        Log::info('RideRepository: Fetching upcoming rides');
+        return Ride::with('driver.profile')
             ->where('departure_time', '>', now())
-            ->orderBy('departure_time')
+            ->orderBy('departure_time', 'asc')
             ->get();
     }
 
-    public function getRideById($rideId): Ride
+    /**
+     * Get ride by ID.
+     *
+     * @param  int  $rideId
+     * @return Ride
+     * @throws ModelNotFoundException
+     */
+    public function getRideById(int $rideId): Ride
     {
-        return Ride::with(['driver', 'bookings.user'])
-            ->findOrFail($rideId); // ✅ Correctly spelled
+        Log::info('RideRepository: Fetch ride by ID', ['ride_id' => $rideId]);
+        return Ride::with(['driver.profile', 'bookings.user'])->findOrFail($rideId);
     }
 
-    public function updateRide($rideId, array $data): Ride
+    /**
+     * Update a ride.
+     *
+     * @param  int   $rideId
+     * @param  array $data
+     * @return Ride
+     * @throws \Exception
+     */
+    public function updateRide(int $rideId, array $data): Ride
     {
-        $ride = Ride::findOrFail($rideId); // Fixed from findOrFall
-        $ride->update($data);
-        return $ride->fresh();
+        Log::info('RideRepository: Updating ride', ['ride_id' => $rideId]);
+
+        return DB::transaction(function () use ($rideId, $data) {
+            $ride = Ride::findOrFail($rideId);
+
+            // Normalize departure_time if provided
+            if (!empty($data['departure_time'])) {
+                $data['departure_time'] = Carbon::parse($data['departure_time'])->toDateTimeString();
+            }
+
+            // Handle spatial changes
+            $rawUpdates = [];
+            if (isset($data['pickup_lat'], $data['pickup_lng'])) {
+                $rawUpdates['pickup_location'] = DB::raw(
+                    sprintf("ST_GeomFromText('POINT(%F %F)',4326)", $data['pickup_lng'], $data['pickup_lat'])
+                );
+                unset($data['pickup_lat'], $data['pickup_lng']);
+            }
+            if (isset($data['destination_lat'], $data['destination_lng'])) {
+                $rawUpdates['destination_location'] = DB::raw(
+                    sprintf("ST_GeomFromText('POINT(%F %F)',4326)", $data['destination_lng'], $data['destination_lat'])
+                );
+                unset($data['destination_lat'], $data['destination_lng']);
+            }
+
+            // Fill remaining attributes
+            $ride->fill($data);
+
+            // Merge raw updates if any
+            if ($rawUpdates) {
+                $current = $ride->getAttributes();
+                $ride->setRawAttributes(array_merge($current, $rawUpdates), true);
+            }
+
+            $ride->save();
+            Log::info('RideRepository: Ride updated', ['ride_id' => $ride->id]);
+            return $ride->fresh();
+        });
     }
 
-    public function deleteRide($rideId): bool
+    /**
+     * Delete a ride.
+     *
+     * @param  int  $rideId
+     * @return bool
+     */
+    public function deleteRide(int $rideId): bool
     {
-        return Ride::destroy($rideId) > 0;
+        Log::info('RideRepository: Deleting ride', ['ride_id' => $rideId]);
+        return (bool) Ride::destroy($rideId);
     }
 
-    public function getDriverRides($userId): \Illuminate\Database\Eloquent\Collection
+    /**
+     * Get rides for a specific driver.
+     *
+     * @param  int  $userId
+     * @return Collection
+     */
+    public function getDriverRides(int $userId): Collection
     {
+        Log::info('RideRepository: Fetching driver rides', ['user_id' => $userId]);
         return Ride::where('driver_id', $userId)
             ->withCount('bookings')
             ->orderBy('departure_time', 'desc')
             ->get();
     }
 
-    public function bookRide($rideId, array $bookingData): Booking
+    /**
+     * Book seats on a ride.
+     *
+     * @param  int   $rideId
+     * @param  array $bookingData
+     * @return Booking
+     * @throws \Exception
+     */
+    public function bookRide(int $rideId, array $bookingData): Booking
     {
+        Log::info('RideRepository: Booking ride', ['ride_id' => $rideId, 'seats' => $bookingData['seats']]);
+
         return DB::transaction(function () use ($rideId, $bookingData) {
             $ride = Ride::lockForUpdate()->findOrFail($rideId);
-
             if ($ride->available_seats < $bookingData['seats']) {
-                throw new \Exception('Not enough available seats');
+                throw new \Exception('Not enough available seats', 400);
             }
 
             $booking = $ride->bookings()->create($bookingData);
             $ride->decrement('available_seats', $bookingData['seats']);
 
-            return $booking->load('user');
+            Log::info('RideRepository: Ride booked', ['booking_id' => $booking->id]);
+            return $booking->load('user', 'ride');
         });
     }
 
-    public function searchRides(array $criteria): \Illuminate\Database\Eloquent\Collection
+    /**
+     * Search rides based on criteria.
+     *
+     * @param  array $criteria
+     * @return Collection
+     */
+    public function searchRides(array $criteria): Collection
     {
-        return Ride::query()
-            ->when(isset($criteria['from']), function ($query) use ($criteria) {
-                $query->nearLocation(
-                    $criteria['from']['lat'],
-                    $criteria['from']['lng'],
-                    $criteria['radius'] ?? 10
-                );
-            })
-            ->where('departure_time', '>=', now())
-            ->where('available_seats', '>=', $criteria['seats'])
-            ->orderBy('departure_time')
-            ->get();
+        Log::info('RideRepository: Searching rides', $criteria);
+
+        $query = Ride::query()->with('driver.profile');
+
+        if (!empty($criteria['from']['lat']) && !empty($criteria['from']['lng'])) {
+            $lat    = (float) $criteria['from']['lat'];
+            $lng    = (float) $criteria['from']['lng'];
+            $radius = ((int) ($criteria['radius'] ?? 10)) * 1000;
+            $point  = sprintf("POINT(%F %F)", $lng, $lat);
+
+            $query->whereRaw(
+                "ST_Distance_Sphere(pickup_location, ST_GeomFromText(?,4326)) <= ?",
+                [$point, $radius]
+            );
+        }
+
+        if (!empty($criteria['departure_after'])) {
+            $query->where('departure_time', '>=', Carbon::parse($criteria['departure_after'])->toDateTimeString());
+        }
+
+        if (!empty($criteria['seats'])) {
+            $query->where('available_seats', '>=', (int) $criteria['seats']);
+        }
+
+        return $query->orderBy('departure_time', 'asc')->get();
     }
 }

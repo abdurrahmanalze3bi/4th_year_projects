@@ -31,8 +31,9 @@ class Ride extends Model
     protected $casts = [
         'departure_time' => 'datetime',
         'route_geometry' => 'array',
-        'pickup_location' => 'array',       // Cast spatial POINT to array
-        'destination_location' => 'array',  // Cast spatial POINT to array
+        // Remove these lines:
+        // 'pickup_location' => 'array',
+        // 'destination_location' => 'array',
     ];
 
     public function driver(): BelongsTo
@@ -89,5 +90,40 @@ class Ride extends Model
             'lng' => $this->destination_location['lng'] ?? null,
         ];
     }
-    
+    public function setPickupLocationAttribute(array $coordinates)
+    {
+        $this->attributes['pickup_location'] = DB::raw(
+            "ST_GeomFromText('POINT({$coordinates['lng']} {$coordinates['lat']})', 4326)"
+        );
+    }
+
+    public function setDestinationLocationAttribute(array $coordinates)
+    {
+        $this->attributes['destination_location'] = DB::raw(
+            "ST_GeomFromText('POINT({$coordinates['lng']} {$coordinates['lat']})', 4326)"
+        );
+    }
+
+// Add proper accessors
+    public function getPickupLocationAttribute($value)
+    {
+        if (!$value) return null;
+
+        $point = \DB::selectOne("
+        SELECT ST_X({$value}) AS lng, ST_Y({$value}) AS lat
+    ");
+
+        return ['lat' => $point->lat, 'lng' => $point->lng];
+    }
+
+    public function getDestinationLocationAttribute($value)
+    {
+        if (!$value) return null;
+
+        $point = \DB::selectOne("
+        SELECT ST_X({$value}) AS lng, ST_Y({$value}) AS lat
+    ");
+
+        return ['lat' => $point->lat, 'lng' => $point->lng];
+    }
 }

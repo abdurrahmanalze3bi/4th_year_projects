@@ -14,9 +14,10 @@ return [
     |
     */
     'openroute' => [
-        'key' => env('OPENROUTE_KEY', ''),
-        'geocode_endpoint' => 'https://api.openrouteservice.org/geocode/search',
-        'directions_endpoint' => 'https://api.openrouteservice.org/v2/directions/driving-car'
+        'api_key' => env('OPENROUTE_API_KEY'),
+        'cache_ttl' => env('OPENROUTE_CACHE_TTL', 86400),
+        'ssl_verify' => env('OPENROUTE_SSL_VERIFY', true),
+        'timeout' => env('OPENROUTE_TIMEOUT', 30),
     ],
     'mailgun' => [
         'domain' => env('MAILGUN_DOMAIN'),

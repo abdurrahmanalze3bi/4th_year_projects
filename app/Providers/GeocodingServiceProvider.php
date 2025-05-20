@@ -3,18 +3,19 @@
 namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
-use App\Interfaces\GeocodingServiceInterface;
 use App\Services\OpenRouteService;
+use App\Interfaces\GeocodingServiceInterface;
 
 class GeocodingServiceProvider extends ServiceProvider
 {
-    // app/Providers/GeocodingServiceProvider.php
     public function register()
     {
         $this->app->singleton(GeocodingServiceInterface::class, function ($app) {
             return new OpenRouteService(
-                config('services.openroute.key'),          // API key
-                config('services.openroute.cache_ttl', 86400) // Cache TTL
+                config('services.openroute.api_key'),
+                config('services.openroute.cache_ttl', 86400),
+                config('services.openroute.ssl_verify', true),
+                config('services.openroute.timeout', 30)
             );
         });
     }

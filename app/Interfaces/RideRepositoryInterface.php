@@ -1,18 +1,27 @@
 <?php
 
 namespace App\Interfaces;
+
 use App\Models\Booking;
 use App\Models\Ride;
 use Illuminate\Database\Eloquent\Collection;
-// app/Interfaces/RideRepositoryInterface.php
+
 interface RideRepositoryInterface
 {
     public function createRide(array $data): Ride;
+
     public function getUpcomingRides(): Collection;
-    public function getRideById($rideId): Ride;
-    public function updateRide($rideId, array $data): Ride;
-    public function deleteRide($rideId): bool;
-    public function getDriverRides($userId): Collection;
-    public function bookRide($rideId, array $bookingData): Booking;
+
+    // Match the parameter type and return type
+    public function getRideById(int $rideId): Ride;
+
+    public function updateRide(int $rideId, array $data): Ride;
+
+    public function deleteRide(int $rideId): bool;
+
+    public function getDriverRides(int $userId): Collection;
+
+    public function bookRide(int $rideId, array $bookingData): Booking;
+
     public function searchRides(array $criteria): Collection;
 }
