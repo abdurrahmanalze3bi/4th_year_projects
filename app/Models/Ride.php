@@ -97,7 +97,7 @@ class Ride extends Model
         );
     }
 
-    public function setDestinationLocationAttribute(array $coordinates)
+   public function setDestinationLocationAttribute(array $coordinates)
     {
         $this->attributes['destination_location'] = DB::raw(
             "ST_GeomFromText('POINT({$coordinates['lng']} {$coordinates['lat']})', 4326)"
@@ -105,25 +105,38 @@ class Ride extends Model
     }
 
 // Add proper accessors
-    public function getPickupLocationAttribute($value)
+    public function getPickupLocationAttribute(): ?array
     {
-        if (!$value) return null;
+        $row = \DB::selectOne(
+            'SELECT ST_AsText(pickup_location) AS wkt FROM rides WHERE id = ?',
+            [$this->id]
+        );
 
-        $point = \DB::selectOne("
-        SELECT ST_X({$value}) AS lng, ST_Y({$value}) AS lat
-    ");
+        if (! $row || ! isset($row->wkt)) {
+            return null;
+        }
 
-        return ['lat' => $point->lat, 'lng' => $point->lng];
+        // wkt will be like "POINT(36.315170 33.513640)"
+        sscanf($row->wkt, 'POINT(%f %f)', $lng, $lat);
+
+        return ['lat' => $lat, 'lng' => $lng];
     }
 
-    public function getDestinationLocationAttribute($value)
+
+    public function getDestinationLocationAttribute(): ?array
     {
-        if (!$value) return null;
+        $row = \DB::selectOne(
+            'SELECT ST_AsText(destination_location) AS wkt FROM rides WHERE id = ?',
+            [$this->id]
+        );
 
-        $point = \DB::selectOne("
-        SELECT ST_X({$value}) AS lng, ST_Y({$value}) AS lat
-    ");
+        if (! $row || ! isset($row->wkt)) {
+            return null;
+        }
 
-        return ['lat' => $point->lat, 'lng' => $point->lng];
+        sscanf($row->wkt, 'POINT(%f %f)', $lng, $lat);
+
+        return ['lat' => $lat, 'lng' => $lng];
     }
+
 }

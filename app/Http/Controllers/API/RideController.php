@@ -130,23 +130,25 @@ class RideController extends Controller
         return [
             'id' => $ride->id,
             'driver' => [
-                'name' => $ride->driver->full_name,
-                'avatar' => $ride->driver->profile->profile_photo_url
+                'name'   => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
+                'avatar' => $ride->driver->avatar, // or profile_photo_url if you’ve saved it in users.avatar
             ],
+// …
             'pickup' => [
-                'address' => $ride->pickup_address,
-                'coordinates' => [
-                    'lat' => $ride->pickup_lat,
-                    'lng' => $ride->pickup_lng
-                ]
+                'address'     => $ride->pickup_address,
+                'coordinates' => $ride->pickup_location ? [
+                    'lat' => $ride->pickup_location['lat'],
+                    'lng' => $ride->pickup_location['lng'],
+                ] : null,
             ],
             'destination' => [
-                'address' => $ride->destination_address,
-                'coordinates' => [
-                    'lat' => $ride->destination_lat,
-                    'lng' => $ride->destination_lng
-                ]
+                'address'     => $ride->destination_address,
+                'coordinates' => $ride->destination_location ? [
+                    'lat' => $ride->destination_location['lat'],
+                    'lng' => $ride->destination_location['lng'],
+                ] : null,
             ],
+
             'departure' => $ride->departure_time->toIso8601String(),
             'seats_available' => $ride->available_seats,
             'price_per_seat' => $ride->price_per_seat,
@@ -197,11 +199,18 @@ class RideController extends Controller
         ], 422);
     }
 
-    private function errorResponse($message, $statusCode)
+    private function errorResponse(string $message, int $statusCode)
     {
-        return response()->json([
-            'success' => false,
-            'message' => $message
-        ], $statusCode);
+        // Ensure the message is valid UTF-8
+        $message = mb_convert_encoding($message, 'UTF-8', 'UTF-8');
+
+        // Use JSON_PARTIAL_OUTPUT_ON_ERROR so Laravel will skip over anything it can't encode
+        return response()->json(
+            ['success' => false, 'message' => $message],
+            $statusCode,
+            [],
+            JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR
+        );
     }
+
 }

@@ -81,6 +81,9 @@ class RideRepository implements RideRepositoryInterface
             $ride->setRawAttributes($attributes, true);
             $ride->save();
 
+            // Reload to ensure spatial attributes are actual geometry, not raw expressions
+            $ride = $ride->fresh();
+
             Log::info('RideRepository: Ride created', ['ride_id' => $ride->id]);
             return $ride;
         });
