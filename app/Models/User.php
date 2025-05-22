@@ -20,6 +20,7 @@ class User extends Authenticatable
      */
     // app/Models/User.php
     protected $fillable = [
+
         'first_name',
         'last_name',
         'email',
@@ -28,7 +29,10 @@ class User extends Authenticatable
         'address',      // Keep existing
         'google_id',    // Added
         'avatar',       ///* Added
-        'status'        // Keep existing
+        'status'  ,
+        'is_verified_passenger',
+        'is_verified_driver',
+        'verification_status'
     ];
 
     protected $hidden = [
@@ -63,7 +67,10 @@ class User extends Authenticatable
     public function rides() {
         return $this->hasMany(Ride::class, 'driver_id');
     }
-
+    public function photos()
+    {
+        return $this->hasMany(Photo::class);
+    }
     public function bookings() {
         return $this->hasMany(Booking::class);
     }

@@ -187,7 +187,7 @@ class OpenRouteService implements GeocodingServiceInterface
                     ],
                     'instructions' => false, // Set to true if needed
                     'geometry' => false,     // Set to true if needed, will increase response size
-                    // 'preference' => 'fastest', // Default is 'recommended'
+                     'preference' => 'fastest', // Default is 'recommended'
                     // 'units' => 'm', // Default
                 ];
 

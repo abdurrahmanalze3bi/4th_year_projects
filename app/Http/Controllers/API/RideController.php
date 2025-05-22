@@ -20,22 +20,30 @@ class RideController extends Controller
     {
         $user = $request->user();
 
-        // Validate driver profile completeness
-        $this->validateDriverProfile($user);
+        // Only verified drivers can create rides
+        if (! $user->is_verified_driver) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You must be verified as a driver to create rides.'
+            ], 403);
+        }
 
         // Validate ride input
         $validator = Validator::make($request->all(), [
-            'pickup_address' => 'required|string|max:255',
+            'pickup_address'      => 'required|string|max:255',
             'destination_address' => 'required|string|max:255',
-            'departure_time' => 'required|date|after:now',
-            'available_seats' => 'required|integer|min:1',
-            'price_per_seat' => 'required|numeric|min:0',
-            'vehicle_type' => 'required|string|max:50',
-            'notes' => 'nullable|string'
+            'departure_time'      => 'required|date|after:now',
+            'available_seats'     => 'required|integer|min:1',
+            'price_per_seat'      => 'required|numeric|min:0',
+            'vehicle_type'        => 'required|string|max:50',
+            'notes'               => 'nullable|string',
         ]);
 
         if ($validator->fails()) {
-            return $this->validationErrorResponse($validator);
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
         }
 
         try {
@@ -44,68 +52,108 @@ class RideController extends Controller
 
             return response()->json([
                 'success' => true,
-                'data' => $this->formatRideResponse($ride)
+                'data'    => $this->formatRideResponse($ride),
             ], 201);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Ride creation failed: ' . $e->getMessage(), 400);
+            return response()->json([
+                'success' => false,
+                'message' => 'Ride creation failed: ' . $e->getMessage(),
+            ], 400);
         }
     }
 
-    public function getRides(Request $request)
+    /**
+     * List upcoming rides
+     * GET /api/rides
+     */
+    public function getRides()
     {
         try {
             $rides = $this->rideRepository->getUpcomingRides();
 
             return response()->json([
                 'success' => true,
-                'data' => $rides->map(fn ($ride) => $this->formatRideResponse($ride))
-            ]);
+                'data'    => $rides->map(fn($ride) => $this->formatRideResponse($ride)),
+            ], 200);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Failed to fetch rides: ' . $e->getMessage(), 500);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch rides: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
-    public function getRideDetails($rideId)
+    /**
+     * Get detailed ride info
+     * GET /api/rides/{rideId}
+     */
+    public function getRideDetails(int $rideId)
     {
         try {
             $ride = $this->rideRepository->getRideById($rideId);
+
             return response()->json([
                 'success' => true,
-                'data' => $this->formatRideDetailsResponse($ride)
-            ]);
+                'data'    => $this->formatRideDetailsResponse($ride),
+            ], 200);
 
         } catch (\Exception $e) {
-            return $this->errorResponse('Ride not found: ' . $e->getMessage(), 404);
+            return response()->json([
+                'success' => false,
+                'message' => 'Ride not found: ' . $e->getMessage(),
+            ], 404);
         }
     }
 
-    public function bookRide(Request $request, $rideId)
+    /**
+     * Book a ride (passengers only)
+     * POST /api/rides/{rideId}/book
+     */
+    public function bookRide(Request $request, int $rideId)
     {
+        $user = $request->user();
+
+        // Only verified passengers can book rides
+        if (! $user->is_verified_passenger) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You must be verified as a passenger to book rides.'
+            ], 403);
+        }
+
+        // Validate booking input
         $validator = Validator::make($request->all(), [
-            'seats' => 'required|integer|min:1|max:10'
+            'seats' => 'required|integer|min:1|max:10',
         ]);
 
         if ($validator->fails()) {
-            return $this->validationErrorResponse($validator);
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
         }
 
         try {
             $booking = $this->rideRepository->bookRide($rideId, [
-                'user_id' => $request->user()->id,
-                'seats' => $request->seats
+                'user_id' => $user->id,
+                'seats'   => $request->input('seats'),
             ]);
 
             return response()->json([
                 'success' => true,
-                'data' => $this->formatBookingResponse($booking)
+                'data'    => $this->formatBookingResponse($booking),
             ], 201);
 
         } catch (\Exception $e) {
-            return $this->errorResponse($e->getMessage(), 400);
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 400);
         }
     }
+
 
     private function validateDriverProfile($user)
     {

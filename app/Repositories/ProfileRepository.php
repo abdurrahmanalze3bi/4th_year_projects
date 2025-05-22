@@ -58,6 +58,7 @@ class ProfileRepository implements ProfileRepositoryInterface
 
 
 
+
     public function createFromUser(User $user)
     {
         return $this->model->create([

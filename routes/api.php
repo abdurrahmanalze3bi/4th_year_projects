@@ -1,7 +1,9 @@
 <?php
 
 use App\Http\Controllers\API\Auth\GoogleController;
+use App\Http\Controllers\API\DocumentController;
 use App\Http\Controllers\API\RideController;
+use App\Http\Controllers\API\VerificationController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\SignupController;
@@ -34,19 +36,24 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/user', fn(Request $r) => $r->user());
     Route::post('/logout', \App\Http\Controllers\API\LogoutController::class);
 
-    Route::post('/rides', [RideController::class, 'createRide']);
-    Route::get('/rides', [RideController::class, 'getRides']);
-    Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
-    Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
 
 
 
     // Profile routes
     Route::prefix('profile')->group(function () {
+        Route::post('/documents', [DocumentController::class, 'store']);
+        Route::post('/verify/passenger', [VerificationController::class, 'verifyPassenger']);
+        Route::post('/verify/driver', [VerificationController::class, 'verifyDriver']);
         Route::get('/', [\App\Http\Controllers\API\ProfileController::class, 'show']);
+        Route::get('/profile/verify/status/{userId}', [VerificationController::class, 'status']);
         Route::post('/', [\App\Http\Controllers\API\ProfileController::class, 'update']);
         Route::post('/{userId}/comments', [\App\Http\Controllers\API\ProfileController::class, 'comment']);
     });
+
+    Route::post('/rides', [RideController::class, 'createRide']);
+    Route::get('/rides', [RideController::class, 'getRides']);
+    Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
+    Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
 });
 
     // other auth’d routes…

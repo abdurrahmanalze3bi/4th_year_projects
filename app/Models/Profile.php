@@ -20,7 +20,7 @@ class Profile extends Model
         'type_of_car',
         'color_of_car',
         'number_of_seats',
-        //'comments',
+
         'radio',
         'smoking',
         'face_id_pic',
