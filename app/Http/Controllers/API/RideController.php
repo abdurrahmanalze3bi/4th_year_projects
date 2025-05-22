@@ -3,24 +3,34 @@
 namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
+use App\Interfaces\GeocodingServiceInterface;
 use App\Interfaces\RideRepositoryInterface;
+use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
+
 class RideController extends Controller
 {
-    private $rideRepository;
+    private RideRepositoryInterface      $rideRepository;
+    private GeocodingServiceInterface    $geo;
 
-    public function __construct(RideRepositoryInterface $rideRepository)
-    {
+    public function __construct(
+        RideRepositoryInterface $rideRepository,
+        GeocodingServiceInterface $geocodingService
+    ) {
         $this->rideRepository = $rideRepository;
+        $this->geo            = $geocodingService;
     }
 
+    /**
+     * Create a ride (drivers only). Accepts either raw address or exact coords.
+     */
     public function createRide(Request $request)
     {
         $user = $request->user();
 
-        // Only verified drivers can create rides
+        // Only verified drivers
         if (! $user->is_verified_driver) {
             return response()->json([
                 'success' => false,
@@ -28,15 +38,19 @@ class RideController extends Controller
             ], 403);
         }
 
-        // Validate ride input
+        // Validate input: require either address or coordinates for each end
         $validator = Validator::make($request->all(), [
-            'pickup_address'      => 'required|string|max:255',
-            'destination_address' => 'required|string|max:255',
-            'departure_time'      => 'required|date|after:now',
-            'available_seats'     => 'required|integer|min:1',
-            'price_per_seat'      => 'required|numeric|min:0',
-            'vehicle_type'        => 'required|string|max:50',
-            'notes'               => 'nullable|string',
+            'pickup_address'       => 'required_without:pickup_lat|string|max:255',
+            'pickup_lat'           => 'required_without:pickup_address|numeric',
+            'pickup_lng'           => 'required_with:pickup_lat|numeric',
+            'destination_address'  => 'required_without:destination_lat|string|max:255',
+            'destination_lat'      => 'required_without:destination_address|numeric',
+            'destination_lng'      => 'required_with:destination_lat|numeric',
+            'departure_time'       => 'required|date|after:now',
+            'available_seats'      => 'required|integer|min:1',
+            'price_per_seat'       => 'required|numeric|min:0',
+            'vehicle_type'         => 'required|string|max:50',
+            'notes'                => 'nullable|string|max:500',
         ]);
 
         if ($validator->fails()) {
@@ -47,8 +61,46 @@ class RideController extends Controller
         }
 
         try {
-            $rideData = array_merge($validator->validated(), ['driver_id' => $user->id]);
-            $ride = $this->rideRepository->createRide($rideData);
+            // Determine pickup data
+            if ($request->filled('pickup_address')) {
+                $pickup = $this->geo->geocodeAddress($request->input('pickup_address'));
+            } else {
+                $pickup = [
+                    'lat'   => (float)$request->input('pickup_lat'),
+                    'lng'   => (float)$request->input('pickup_lng'),
+                    'label' => null,
+                ];
+            }
+
+            // Determine destination data
+            if ($request->filled('destination_address')) {
+                $destination = $this->geo->geocodeAddress($request->input('destination_address'));
+            } else {
+                $destination = [
+                    'lat'   => (float)$request->input('destination_lat'),
+                    'lng'   => (float)$request->input('destination_lng'),
+                    'label' => null,
+                ];
+            }
+
+            // Assemble payload for repository
+            $data = [
+                'driver_id'           => $user->id,
+                'pickup_address'      => $request->input('pickup_address') ?? $pickup['label'],
+                'destination_address' => $request->input('destination_address') ?? $destination['label'],
+                'pickup_lat'          => $pickup['lat'],
+                'pickup_lng'          => $pickup['lng'],
+                'destination_lat'     => $destination['lat'],
+                'destination_lng'     => $destination['lng'],
+                'departure_time'      => $request->input('departure_time'),
+                'available_seats'     => $request->input('available_seats'),
+                'price_per_seat'      => $request->input('price_per_seat'),
+                'vehicle_type'        => $request->input('vehicle_type'),
+                'notes'               => $request->input('notes'),
+            ];
+
+            // Delegate creation to repository
+            $ride = $this->rideRepository->createRide($data);
 
             return response()->json([
                 'success' => true,
@@ -62,33 +114,6 @@ class RideController extends Controller
             ], 400);
         }
     }
-
-    /**
-     * List upcoming rides
-     * GET /api/rides
-     */
-    public function getRides()
-    {
-        try {
-            $rides = $this->rideRepository->getUpcomingRides();
-
-            return response()->json([
-                'success' => true,
-                'data'    => $rides->map(fn($ride) => $this->formatRideResponse($ride)),
-            ], 200);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to fetch rides: ' . $e->getMessage(),
-            ], 500);
-        }
-    }
-
-    /**
-     * Get detailed ride info
-     * GET /api/rides/{rideId}
-     */
     public function getRideDetails(int $rideId)
     {
         try {
@@ -106,16 +131,34 @@ class RideController extends Controller
             ], 404);
         }
     }
+    public function getRides(Request $request)
+    {
+        $user = $request->user();    // the authenticated user
+
+        try {
+            // only rides for this driver
+            $rides = $this->rideRepository->getDriverRides($user->id);
+
+            return response()->json([
+                'success' => true,
+                'data'    => $rides->map(fn($ride) => $this->formatRideResponse($ride)),
+            ], 200);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch rides: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
 
     /**
      * Book a ride (passengers only)
-     * POST /api/rides/{rideId}/book
      */
     public function bookRide(Request $request, int $rideId)
     {
         $user = $request->user();
 
-        // Only verified passengers can book rides
         if (! $user->is_verified_passenger) {
             return response()->json([
                 'success' => false,
@@ -123,7 +166,6 @@ class RideController extends Controller
             ], 403);
         }
 
-        // Validate booking input
         $validator = Validator::make($request->all(), [
             'seats' => 'required|integer|min:1|max:10',
         ]);
@@ -146,14 +188,27 @@ class RideController extends Controller
                 'data'    => $this->formatBookingResponse($booking),
             ], 201);
 
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
             ], 400);
         }
     }
+    public function autocomplete(Request $request)
+    {
+        $text = $request->query('text', '');
+        if (strlen(trim($text)) < 2) {
+            return response()->json(['success' => false, 'message' => 'Type at least 2 characters'], 422);
+        }
 
+        try {
+            $results = $this->geo->autocomplete($text);
+            return response()->json(['success' => true, 'data' => $results]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
 
     private function validateDriverProfile($user)
     {
@@ -178,6 +233,7 @@ class RideController extends Controller
         return [
             'id' => $ride->id,
             'driver' => [
+                'id'     => $ride->driver->id,
                 'name'   => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
                 'avatar' => $ride->driver->avatar, // or profile_photo_url if you’ve saved it in users.avatar
             ],

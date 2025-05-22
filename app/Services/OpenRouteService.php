@@ -38,74 +38,102 @@ class OpenRouteService implements GeocodingServiceInterface
         ]);
     }
 
+
     public function geocodeAddress(string $address): array
     {
-        $focusPoint = ['lat' => 33.5138, 'lon' => 36.2765]; // Damascus center
-        $boundaryCountry = 'SYR'; // Syria ISO 3166-1 alpha-3
+        $url = 'https://nominatim.openstreetmap.org/search';
 
-        $queryParams = [
-            'text' => $address,
-            'size' => 5, // Request more results to inspect if the top one is poor
-            'focus.point.lat' => $focusPoint['lat'],
-            'focus.point.lon' => $focusPoint['lon'],
-            'boundary.country' => $boundaryCountry,
-            // 'layers' => 'address,street,venue', // Experiment if needed
-            // 'sources' => 'openstreetmap,openaddresses,whosonfirst', // Experiment if needed
+        $params = [
+            'q'               => $address,
+            'format'          => 'json',
+            'limit'           => 1,
+            'addressdetails'  => 1,
+            'accept-language' => 'ar',
+            'countrycodes'    => 'sy',               // ← only Syria
+            'bounded'         => 1,                  // ← hard‐limit to that country
         ];
 
-        // More specific cache key
-        $cacheKey = "ors_geocode:v5:" . md5($address . serialize($queryParams));
-        $requestUrl = $this->baseUrl . 'geocode/search';
+        $response = Http::withHeaders([
+            'User-Agent' => 'YourApp/1.0 (contact@youremail.com)'
+        ])
+            ->withoutVerifying()
+            ->timeout(10)
+            ->retry(2, 500)
+            ->get($url, $params);
 
-        Log::info("Attempting to geocode address '{$address}' using OpenRouteService.", [
-            'cache_key' => $cacheKey,
-            'url' => $requestUrl,
-            'query_params' => $queryParams
-        ]);
+        if (! $response->successful()) {
+            throw new \Exception("Geocoding failed: {$response->status()}");
+        }
 
-        return Cache::remember($cacheKey, $this->cacheTtl, function () use ($address, $requestUrl, $queryParams) {
-            try {
-                $response = Http::withOptions([
-                    'verify' => $this->sslVerify,
-                    'timeout' => $this->timeout,
-                    'connect_timeout' => 10, // Shorter connect timeout
-                ])
-                    ->withHeaders([
-                        'Authorization' => $this->apiKey,
-                        'Accept' => 'application/json; charset=utf-8',
-                    ])
-                    ->retry(2, 500, function ($exception, $request) {
-                        // Retry only on server errors or connection issues
-                        return $exception instanceof \Illuminate\Http\Client\ConnectionException || $request->response()->serverError();
-                    })
-                    ->get($requestUrl, $queryParams);
+        $data = $response->json();
+        if (empty($data)) {
+            throw new \Exception("No location found for “{$address}”");
+        }
 
-                // Log the raw response for detailed inspection
-                Log::debug("OpenRouteService Geocoding API RAW RESPONSE for '{$address}':", [
-                    'status' => $response->status(),
-                    'headers' => $response->headers(),
-                    'body' => $response->body(),
-                    'effective_uri' => (string) $response->effectiveUri()
-                ]);
-
-                return $this->handleGeocodeResponse($response, $address);
-
-            } catch (RequestException $e) {
-                Log::error("Geocoding HTTP Request failed for '{$address}'.", [
-                    'url' => $requestUrl, 'params' => $queryParams,
-                    'error' => $e->getMessage(),
-                    'response_status' => optional($e->response)->status(),
-                    'response_body' => optional($e->response)->body(),
-                ]);
-                throw new \Exception("Geocoding service request error for '{$address}': " . $e->getMessage(), 0, $e);
-            } catch (\Exception $e) { // Catch any other unexpected errors
-                Log::error("Geocoding processing failed unexpectedly for '{$address}'.", [
-                    'error' => $e->getMessage(), 'trace' => $e->getTraceAsString()
-                ]);
-                throw new \Exception("Geocoding service unavailable for '{$address}': " . $e->getMessage(), 0, $e);
-            }
-        });
+        return [
+            'label' => $data[0]['display_name'],
+            'lat'   => (float)$data[0]['lat'],
+            'lng'   => (float)$data[0]['lon'],
+        ];
     }
+
+    public function autocomplete(string $partial): array
+    {
+        $url = 'https://nominatim.openstreetmap.org/search';
+
+        $params = [
+            'q'               => $partial,
+            'format'          => 'json',
+            'limit'           => 6,
+            'addressdetails'  => 1,
+            'accept-language' => 'ar',
+            'viewbox'         => '35.5,37.5,42.0,32.0', // left, top, right, bottom (covers Syria)
+            'bounded'         => 1, // restrict results within the box
+        ];
+
+        $resp = Http::withHeaders([
+            'User-Agent' => 'YourAppName/1.0 (contact@yourdomain.com)' // Optional, but good practice for Nominatim
+        ])
+            ->withoutVerifying() // 🚨 TEMPORARILY disable SSL certificate verification
+            ->timeout(10)
+            ->retry(2, 500)
+            ->get($url, $params);
+
+        if (! $resp->successful()) {
+            throw new \Exception("Nominatim autocomplete failed: {$resp->status()}");
+        }
+
+        return collect($resp->json())
+            ->map(fn($f) => [
+                'label' => $f['display_name'],
+                'lat'   => $f['lat'],
+                'lng'   => $f['lon'],
+            ])
+            ->all();
+    }
+    public function reverseGeocode(float $lat, float $lng): string
+    {
+        $url = 'https://nominatim.openstreetmap.org/reverse';
+        $params = [
+            'lat'    => $lat,
+            'lon'    => $lng,
+            'format' => 'json',
+            'accept-language' => 'ar',
+        ];
+        $resp = Http::withHeaders([
+            'User-Agent' => 'MyApp/1.0 (you@domain.com)'
+        ])
+            ->withoutVerifying()
+            ->timeout(10)
+            ->get($url, $params);
+
+        if (! $resp->successful()) {
+            throw new \Exception("Reverse geocoding failed: {$resp->status()}");
+        }
+        $body = $resp->json();
+        return $body['display_name'] ?? "{$lat},{$lng}";
+    }
+
 
     private function handleGeocodeResponse(HttpResponse $response, string $address): array
     {

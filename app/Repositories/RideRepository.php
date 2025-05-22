@@ -27,25 +27,42 @@ class RideRepository implements RideRepositoryInterface
      */
     public function createRide(array $data): Ride
     {
-        Log::info('RideRepository: Creating ride', [
-            'driver_id' => $data['driver_id'],
-            'pickup_address' => $data['pickup_address'],
-            'destination_address' => $data['destination_address'],
-        ]);
-
         return DB::transaction(function () use ($data) {
-            // 1. Geocode addresses
-            $pickup      = $this->routingService->geocodeAddress($data['pickup_address']);
-            $destination = $this->routingService->geocodeAddress($data['destination_address']);
+            // 1. Pickup
+            if (isset($data['pickup_lat'], $data['pickup_lng'])) {
+                $pickup = [
+                    'lat'   => (float)$data['pickup_lat'],
+                    'lng'   => (float)$data['pickup_lng'],
+                ];
+                // reverse-geocode to get a label
+                $pickupLabel = $this->routingService->reverseGeocode($pickup['lat'], $pickup['lng']);
+            } else {
+                $pickup = $this->routingService->geocodeAddress($data['pickup_address']);
+                $pickupLabel = $pickup['label'];
+            }
 
-            // 2. Get route summary
+            // 2. Destination
+            if (isset($data['destination_lat'], $data['destination_lng'])) {
+                $destination = [
+                    'lat' => (float)$data['destination_lat'],
+                    'lng' => (float)$data['destination_lng'],
+                ];
+                $destinationLabel = $this->routingService->reverseGeocode(
+                    $destination['lat'], $destination['lng']
+                );
+            } else {
+                $destination = $this->routingService->geocodeAddress($data['destination_address']);
+                $destinationLabel = $destination['label'];
+            }
+
+            // 3. Route summary
             $route = $this->routingService->getRouteDetails($pickup, $destination);
 
-            // 3. Prepare base attributes, converting ISO8601 to MySQL DATETIME format
-            $baseAttributes = [
+            // 4. Persist with human labels
+            $attributes = [
                 'driver_id'           => $data['driver_id'],
-                'pickup_address'      => $data['pickup_address'],
-                'destination_address' => $data['destination_address'],
+                'pickup_address'      => $pickupLabel,
+                'destination_address' => $destinationLabel,
                 'distance'            => $route['distance'],
                 'duration'            => $route['duration'],
                 'departure_time'      => Carbon::parse($data['departure_time'])->toDateTimeString(),
@@ -53,39 +70,21 @@ class RideRepository implements RideRepositoryInterface
                 'price_per_seat'      => $data['price_per_seat'],
                 'vehicle_type'        => $data['vehicle_type'],
                 'notes'               => $data['notes'] ?? null,
+
+                'pickup_location'      => DB::raw(sprintf(
+                    "ST_GeomFromText('POINT(%F %F)',4326)",
+                    $pickup['lng'], $pickup['lat']
+                )),
+                'destination_location' => DB::raw(sprintf(
+                    "ST_GeomFromText('POINT(%F %F)',4326)",
+                    $destination['lng'], $destination['lat']
+                )),
             ];
 
-            // 4. Build raw spatial expressions
-            $pickupPoint = DB::raw(sprintf(
-                "ST_GeomFromText('POINT(%F %F)', 4326)",
-                $pickup['lng'],
-                $pickup['lat']
-            ));
-            $destinationPoint = DB::raw(sprintf(
-                "ST_GeomFromText('POINT(%F %F)', 4326)",
-                $destination['lng'],
-                $destination['lat']
-            ));
-
-            // 5. Merge raw expressions into attributes
-            $attributes = array_merge(
-                $baseAttributes,
-                [
-                    'pickup_location'      => $pickupPoint,
-                    'destination_location' => $destinationPoint,
-                ]
-            );
-
-            // 6. Instantiate, set raw attributes to bypass mutators, and save
             $ride = new Ride();
             $ride->setRawAttributes($attributes, true);
             $ride->save();
-
-            // Reload to ensure spatial attributes are actual geometry, not raw expressions
-            $ride = $ride->fresh();
-
-            Log::info('RideRepository: Ride created', ['ride_id' => $ride->id]);
-            return $ride;
+            return $ride->fresh();
         });
     }
 
@@ -203,21 +202,34 @@ class RideRepository implements RideRepositoryInterface
      */
     public function bookRide(int $rideId, array $bookingData): Booking
     {
-        Log::info('RideRepository: Booking ride', ['ride_id' => $rideId, 'seats' => $bookingData['seats']]);
+        Log::info('RideRepository: Booking ride', [
+            'ride_id' => $rideId,
+            'user_id' => $bookingData['user_id'] ?? null,
+            'seats'   => $bookingData['seats']
+        ]);
 
         return DB::transaction(function () use ($rideId, $bookingData) {
             $ride = Ride::lockForUpdate()->findOrFail($rideId);
+
             if ($ride->available_seats < $bookingData['seats']) {
                 throw new \Exception('Not enough available seats', 400);
             }
 
-            $booking = $ride->bookings()->create($bookingData);
+            // 🔧 Ensure ride_id is included explicitly
+            $booking = Booking::create([
+                'user_id' => $bookingData['user_id'],
+                'ride_id' => $rideId,
+                'seats'   => $bookingData['seats'],
+            ]);
+
             $ride->decrement('available_seats', $bookingData['seats']);
 
             Log::info('RideRepository: Ride booked', ['booking_id' => $booking->id]);
+
             return $booking->load('user', 'ride');
         });
     }
+
 
     /**
      * Search rides based on criteria.

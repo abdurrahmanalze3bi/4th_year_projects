@@ -54,6 +54,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/rides', [RideController::class, 'getRides']);
     Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
     Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
+    Route::get('/autocomplete', [RideController::class, 'autocomplete']);
+
 });
 
     // other auth’d routes…
