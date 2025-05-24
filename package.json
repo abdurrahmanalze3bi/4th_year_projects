@@ -12,5 +12,10 @@
     },
     "engines": {
         "node": "20.x"
+    },
+    "dependencies": {
+        "firebase": "^11.8.1",
+        "laravel-echo": "^2.1.4",
+        "pusher-js": "^8.4.0"
     }
 }

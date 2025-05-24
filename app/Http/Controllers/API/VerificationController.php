@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
@@ -52,16 +53,23 @@ class VerificationController extends Controller
             }
 
             try {
-                // Handle file uploads
+                // ─── EXACTLY match your ENUM('face_id','back_id','license','mechanic_card') ───
+                $allowedTypes = [
+                    'face_id_pic' => 'face_id',
+                    'back_id_pic' => 'back_id',
+                ];
+
                 foreach (['face_id_pic', 'back_id_pic'] as $field) {
                     $path    = $request->file($field)->store('verifications', 'public');
-                    $docType = str_replace('_pic', '', $field);
+                    $docType = $allowedTypes[$field]; // 'face_id' or 'back_id'
 
+                    // Delete any existing document of that ENUM-type
                     $this->photoRepo->deleteDocumentsByType($user->id, $docType);
+                    // Store new row: type will be exactly 'face_id' or 'back_id'
                     $this->photoRepo->storeDocument($user->id, $docType, $path);
                 }
 
-                // Mark as pending
+                // Mark user as “pending” passenger verification
                 $user->update(['verification_status' => 'pending']);
                 $user = $user->fresh();
 
@@ -126,19 +134,28 @@ class VerificationController extends Controller
                 ], 400);
             }
 
-            // Document uploads
-            foreach ([
-                         'face_id_pic', 'back_id_pic',
-                         'driving_license_pic', 'mechanic_card_pic'
-                     ] as $field) {
-                $path    = $request->file($field)->store('verifications', 'public');
-                $docType = str_replace('_pic', '', $field);
+            // ─── EXACTLY match the ENUM('face_id','back_id','license','mechanic_card') ───
+            $allowedTypes = [
+                'face_id_pic'         => 'face_id',
+                'back_id_pic'         => 'back_id',
+                'driving_license_pic' => 'license',
+                'mechanic_card_pic'   => 'mechanic_card',
+            ];
 
+            foreach (
+                ['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic']
+                as $field
+            ) {
+                $path    = $request->file($field)->store('verifications', 'public');
+                $docType = $allowedTypes[$field]; // one of 'face_id', 'back_id', 'license', 'mechanic_card'
+
+                // Remove any existing photo rows with that EXACT type
                 $this->photoRepo->deleteDocumentsByType($userId, $docType);
+                // Save new row: photos.type = 'license' or 'mechanic_card', etc.
                 $this->photoRepo->storeDocument($userId, $docType, $path);
             }
 
-            // Vehicle info
+            // Vehicle info (unchanged)
             $vehicleData = [
                 'car_pic'         => $request->file('car_pic')->store('verifications', 'public'),
                 'type_of_car'     => $request->input('type_of_car'),
@@ -147,7 +164,7 @@ class VerificationController extends Controller
             ];
             $this->profileRepo->updateProfile($profile->id, $vehicleData);
 
-            // Mark as pending
+            // Mark user as “pending” driver verification
             $user->update(['verification_status' => 'pending']);
 
             return response()->json([
@@ -172,31 +189,35 @@ class VerificationController extends Controller
         try {
             $user = User::findOrFail($userId);
             $statusLabels = [
-                'none'    => 'not_verified',
-                'pending' => 'pending',
-                'rejected'=> 'rejected',
-                'approved'=> 'approved',
+                'none'     => 'not_verified',
+                'pending'  => 'pending',
+                'rejected' => 'rejected',
+                'approved' => 'approved',
             ];
 
-            $documents = $this->photoRepo->getUserDocumentsByType($userId, [
-                'face_id', 'back_id', 'driving_license', 'mechanic_card'
-            ])->mapWithKeys(fn($doc) => [
-                $doc->type => asset("storage/{$doc->path}")
-            ]);
+            // Request exactly the ENUM values: face_id, back_id, license, mechanic_card
+            $enumTypes = ['face_id', 'back_id', 'license', 'mechanic_card'];
+
+            $documents = $this->photoRepo
+                ->getUserDocumentsByType($userId, $enumTypes)
+                ->mapWithKeys(fn($doc) => [
+                    // For each Photo row, $doc->type is exactly 'face_id' or 'license', etc.
+                    $doc->type => asset("storage/{$doc->path}")
+                ]);
 
             $profile = $this->profileRepo->getProfileByUserId($userId);
 
             return response()->json([
-                'success' => true,
-                'status'  => $statusLabels[$user->verification_status] ?? 'unknown',
+                'success'   => true,
+                'status'    => $statusLabels[$user->verification_status] ?? 'unknown',
                 'documents' => $documents,
-                'vehicle' => $profile ? [
+                'vehicle'   => $profile ? [
                     'type'  => $profile->type_of_car,
                     'color' => $profile->color_of_car,
                     'seats' => $profile->number_of_seats,
                     'photo' => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null
                 ] : null,
-                'verified' => [
+                'verified'  => [
                     'passenger' => (bool) $user->is_verified_passenger,
                     'driver'    => (bool) $user->is_verified_driver,
                 ],

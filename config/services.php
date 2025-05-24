@@ -41,4 +41,8 @@ return [
         'client_secret' => env('GOOGLE_CLIENT_SECRET'), // Reference .env variable name
         'redirect' => env('GOOGLE_REDIRECT_URL'), // Reference .env variable name
     ],
+    'fcm' => [
+        'server_key' => env('FCM_SERVER_KEY'),
+        'sender_id' => env('FCM_SENDER_ID'),
+    ],
 ];

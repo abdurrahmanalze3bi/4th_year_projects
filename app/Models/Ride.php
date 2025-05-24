@@ -7,34 +7,47 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\DB;
 
 class Ride extends Model
 {
     use HasFactory;
 
+    /**
+     * Fillable: DO NOT include old pickup_lat/pickup_lng or destination_lat/destination_lng here.
+     * Instead, include only driver_id, pickup_address, destination_address, distance, etc.
+     */
     protected $fillable = [
         'driver_id',
         'pickup_address',
         'destination_address',
-        'pickup_location',    // Spatial POINT field
-        'destination_location', // Spatial POINT field
+        // (no pickup_lat/pickup_lng!)
+        // (no destination_lat/destination_lng!)
         'distance',
         'duration',
-        'route_geometry',
+        'route_geometry',       // JSON
         'departure_time',
         'available_seats',
         'price_per_seat',
         'vehicle_type',
-        'notes'
+        'notes',
+        // We will write to pickup_location and destination_location via the setter
     ];
 
+    /**
+     * Cast route_geometry (JSON) into a PHP array automatically.
+     */
     protected $casts = [
         'departure_time' => 'datetime',
+        'pickup_location' => 'array',
+        'destination_location' => 'array',
         'route_geometry' => 'array',
-        // Remove these lines:
-        // 'pickup_location' => 'array',
-        // 'destination_location' => 'array',
+        'status' => 'string'
     ];
+
+    //------------------------------------------------------------------------//
+    // Relationships
+    //------------------------------------------------------------------------//
 
     public function driver(): BelongsTo
     {
@@ -46,88 +59,47 @@ class Ride extends Model
         return $this->hasMany(Booking::class);
     }
 
-    /**
-     * Scope for rides near a specific location
-     *
-     * @param Builder $query
-     * @param float $latitude
-     * @param float $longitude
-     * @param int $radius (in kilometers)
-     */
-    public function scopeNearLocation(
-        Builder $query,
-        float $latitude,
-        float $longitude,
-        int $radius = 10
-    ): void {
-        $query->whereRaw(
-            "ST_Distance_Sphere(
-                pickup_location,
-                ST_GeomFromText('POINT(? ?)', 4326)
-            ) <= ?",
-            [$longitude, $latitude, $radius * 1000] // Convert km to meters
-        );
-    }
+    //------------------------------------------------------------------------//
+    // Custom Accessors for pickup_location / destination_location
+    //------------------------------------------------------------------------//
 
     /**
-     * Get formatted pickup coordinates
+     * Return pickup_location as an array [ 'lat' => ..., 'lng' => ... ].
+     * The database column is a POINT; here we run a raw SELECT ST_AsText(...) to parse it.
      */
-    public function getPickupCoordinatesAttribute(): array
-    {
-        return [
-            'lat' => $this->pickup_location['lat'] ?? null,
-            'lng' => $this->pickup_location['lng'] ?? null,
-        ];
-    }
-
-    /**
-     * Get formatted destination coordinates
-     */
-    public function getDestinationCoordinatesAttribute(): array
-    {
-        return [
-            'lat' => $this->destination_location['lat'] ?? null,
-            'lng' => $this->destination_location['lng'] ?? null,
-        ];
-    }
-    public function setPickupLocationAttribute(array $coordinates)
-    {
-        $this->attributes['pickup_location'] = DB::raw(
-            "ST_GeomFromText('POINT({$coordinates['lng']} {$coordinates['lat']})', 4326)"
-        );
-    }
-
-   public function setDestinationLocationAttribute(array $coordinates)
-    {
-        $this->attributes['destination_location'] = DB::raw(
-            "ST_GeomFromText('POINT({$coordinates['lng']} {$coordinates['lat']})', 4326)"
-        );
-    }
-
-// Add proper accessors
     public function getPickupLocationAttribute(): ?array
     {
-        $row = \DB::selectOne(
-            'SELECT ST_AsText(pickup_location) AS wkt FROM rides WHERE id = ?',
-            [$this->id]
+        if (!isset($this->attributes['id'])) {
+            return null;
+        }
+
+        $row = DB::selectOne(
+            'SELECT ST_AsText(`pickup_location`) AS wkt FROM `rides` WHERE `id` = ?',
+            [$this->attributes['id']]
         );
 
         if (! $row || ! isset($row->wkt)) {
             return null;
         }
 
-        // wkt will be like "POINT(36.315170 33.513640)"
+        // wkt looks like "POINT(<lng> <lat>)"
         sscanf($row->wkt, 'POINT(%f %f)', $lng, $lat);
 
         return ['lat' => $lat, 'lng' => $lng];
     }
 
-
+    /**
+     * Return destination_location as an array [ 'lat' => ..., 'lng' => ... ].
+     */
     public function getDestinationLocationAttribute(): ?array
     {
-        $row = \DB::selectOne(
-            'SELECT ST_AsText(destination_location) AS wkt FROM rides WHERE id = ?',
-            [$this->id]
+        if (!isset($this->attributes['id'])) {
+            return null;
+        }
+
+        $row = DB::selectOne(
+            'SELECT ST_AsText(`destination_location`) AS wkt FROM `rides` WHERE `id` = ?',
+            [$this->attributes['id']]
         );
 
         if (! $row || ! isset($row->wkt)) {
@@ -139,4 +111,56 @@ class Ride extends Model
         return ['lat' => $lat, 'lng' => $lng];
     }
 
+    //------------------------------------------------------------------------//
+    // Custom Mutators (Setters) for pickup_location / destination_location
+    //------------------------------------------------------------------------//
+
+    /**
+     * Expect $coords = [ 'lat' => float, 'lng' => float ].
+     * We convert it into a MySQL POINT(...) with SRID 4326 when saving.
+     */
+    public function setPickupLocationAttribute(array $coords)
+    {
+        if (isset($coords['lat'], $coords['lng'])) {
+            $lat = (float) $coords['lat'];
+            $lng = (float) $coords['lng'];
+            $this->attributes['pickup_location'] = DB::raw(
+                sprintf("ST_GeomFromText('POINT(%F %F)',4326)", $lng, $lat)
+            );
+        }
+    }
+
+    /**
+     * Same for destination_location.
+     */
+    public function setDestinationLocationAttribute(array $coords)
+    {
+        if (isset($coords['lat'], $coords['lng'])) {
+            $lat = (float) $coords['lat'];
+            $lng = (float) $coords['lng'];
+            $this->attributes['destination_location'] = DB::raw(
+                sprintf("ST_GeomFromText('POINT(%F %F)',4326)", $lng, $lat)
+            );
+        }
+    }
+
+    //------------------------------------------------------------------------//
+    // (Optional) Scope for “nearby” searching by pickup location
+    //------------------------------------------------------------------------//
+
+    /**
+     * Scope to find all rides whose pickup_location is within $radiusKm kilometers.
+     * You can use this in your repository or controllers if needed.
+     */
+    public function scopeNearLocation(Builder $query, float $latitude, float $longitude, int $radiusKm = 10): void
+    {
+        $radiusMeters = $radiusKm * 1000;
+        $query->whereRaw(
+            "ST_Distance_Sphere(
+                `pickup_location`,
+                ST_GeomFromText('POINT(? ?)', 4326)
+            ) <= ?",
+            [$longitude, $latitude, $radiusMeters]
+        );
+    }
 }

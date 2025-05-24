@@ -13,6 +13,7 @@ return new class extends Migration
     public function up()
     {
         Schema::create('photos', function (Blueprint $table) {
+            $table->engine = 'InnoDB';
             $table->id();
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->enum('type', ['face_id', 'back_id', 'license', 'mechanic_card']);

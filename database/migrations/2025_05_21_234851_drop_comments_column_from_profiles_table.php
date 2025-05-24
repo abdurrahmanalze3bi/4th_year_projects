@@ -9,6 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('profiles', function (Blueprint $table) {
+            $table->engine = 'InnoDB';
             $table->dropColumn('comments');
         });
     }

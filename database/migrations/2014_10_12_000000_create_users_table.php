@@ -11,27 +11,42 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // When this migration runs, it will create `users` as InnoDB.
         Schema::create('users', function (Blueprint $table) {
+            // ────────────────────────────────────────
+            // 1) Force the storage engine to InnoDB
+            // ────────────────────────────────────────
+            $table->engine = 'InnoDB';
+
+            // ────────────────────────────────────────
+            // 2) Primary key + required Laravel fields
+            // ────────────────────────────────────────
             $table->id();
             $table->string('first_name');
             $table->string('last_name');
             $table->string('email')->unique();
-            $table->string('password')->nullable(); // Password is nullable for social login
+            $table->timestamp('email_verified_at')->nullable();
+            $table->string('password')->nullable();     // nullable for social login
+            $table->rememberToken();
+
+            // ────────────────────────────────────────
+            // 3) Your custom columns
+            // ────────────────────────────────────────
             $table->enum('gender', ['M', 'F'])->nullable();
             $table->enum('address', [
-                'دمشق', 'درعا', 'القنيطرة', 'السويداء', 'ريف دمشق',
-                'حمص', 'حماة', 'اللاذقية', 'طرطوس', 'حلب',
-                'ادلب', 'الحسكة', 'الرقة', 'دير الزور'
+                'دمشق','درعا','القنيطرة','السويداء','ريف دمشق',
+                'حمص','حماة','اللاذقية','طرطوس','حلب',
+                'ادلب','الحسكة','الرقة','دير الزور'
             ])->nullable();
 
-            $table->string('google_id')->nullable()->unique(); // For Google login
-            $table->string('avatar')->nullable(); // Avatar from Google or uploaded
-            $table->tinyInteger('status')->default(1); // Active/inactive
+            $table->string('google_id')->nullable()->unique();
+            $table->string('avatar')->nullable();
+            $table->tinyInteger('status')->default(1);
 
-            // Verification fields
             $table->boolean('is_verified_passenger')->default(0);
             $table->boolean('is_verified_driver')->default(0);
-            $table->enum('verification_status', ['none', 'pending', 'rejected', 'approved'])->default('none');
+            $table->enum('verification_status', ['none','pending','rejected','approved'])
+                ->default('none');
 
             $table->timestamps();
         });

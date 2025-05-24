@@ -2,11 +2,13 @@
 
 namespace App\Providers;
 
+use App\Interfaces\ChatRepositoryInterface;
 use App\Interfaces\PasswordResetRepositoryInterface;
 use App\Interfaces\ProfileRepositoryInterface;
 use App\Interfaces\UserRepositoryInterface;
 use App\Models\User;
 use App\Observers\UserObserver;
+use App\Repositories\ChatRepository;
 use App\Repositories\PasswordResetRepository;
 use App\Repositories\ProfileRepository;
 use App\Repositories\UserRepository;
@@ -24,7 +26,7 @@ class AppServiceProvider extends ServiceProvider
             \App\Interfaces\PhotoRepositoryInterface::class,
             \App\Repositories\PhotoRepository::class
         );
-
+        $this->app->bind(ChatRepositoryInterface::class, ChatRepository::class);
         $this->app->bind(
             \App\Interfaces\VerificationRepositoryInterface::class,
             \App\Repositories\VerificationRepository::class

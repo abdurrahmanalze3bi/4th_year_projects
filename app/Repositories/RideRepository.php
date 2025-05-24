@@ -1,7 +1,8 @@
 <?php
 
 namespace App\Repositories;
-
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Query\Builder;
 use App\Interfaces\RideRepositoryInterface;
 use App\Models\Ride;
 use App\Models\Booking;
@@ -16,7 +17,9 @@ class RideRepository implements RideRepositoryInterface
 {
     public function __construct(
         private OpenRouteService $routingService
-    ) {}
+    )
+    {
+    }
 
     /**
      * Create a new ride with geocoding and routing details.
@@ -28,61 +31,138 @@ class RideRepository implements RideRepositoryInterface
     public function createRide(array $data): Ride
     {
         return DB::transaction(function () use ($data) {
-            // 1. Pickup
-            if (isset($data['pickup_lat'], $data['pickup_lng'])) {
+            // ────────────────────────────────────────────────────────────
+            // 1) Pickup: use 'pickup_location' array if provided, otherwise geocode 'pickup_address'
+            // ────────────────────────────────────────────────────────────
+            if (
+                isset($data['pickup_location'])
+                && is_array($data['pickup_location'])
+                && array_key_exists('lat', $data['pickup_location'])
+                && array_key_exists('lng', $data['pickup_location'])
+            ) {
                 $pickup = [
-                    'lat'   => (float)$data['pickup_lat'],
-                    'lng'   => (float)$data['pickup_lng'],
+                    'lat' => (float) $data['pickup_location']['lat'],
+                    'lng' => (float) $data['pickup_location']['lng'],
                 ];
-                // reverse-geocode to get a label
-                $pickupLabel = $this->routingService->reverseGeocode($pickup['lat'], $pickup['lng']);
-            } else {
-                $pickup = $this->routingService->geocodeAddress($data['pickup_address']);
-                $pickupLabel = $pickup['label'];
+                // Reverse‐geocode to get a human‐readable label
+                $pickupLabel = $this->routingService->reverseGeocode(
+                    $pickup['lat'],
+                    $pickup['lng']
+                );
+            }
+            elseif (!empty($data['pickup_address'])) {
+                // Controller provided a textual address
+                $pickupResult = $this->routingService->geocodeAddress($data['pickup_address']);
+                // Expect geocodeAddress to return [ 'lat' => float, 'lng' => float, 'label' => string ]
+                $pickup      = [
+                    'lat' => (float) $pickupResult['lat'],
+                    'lng' => (float) $pickupResult['lng'],
+                ];
+                $pickupLabel = $pickupResult['label'];
+            }
+            else {
+                throw new \Exception("Missing pickup data: must provide 'pickup_location' or 'pickup_address'.");
             }
 
-            // 2. Destination
-            if (isset($data['destination_lat'], $data['destination_lng'])) {
+            // ────────────────────────────────────────────────────────────
+            // 2) Destination: same pattern as pickup
+            // ────────────────────────────────────────────────────────────
+            if (
+                isset($data['destination_location'])
+                && is_array($data['destination_location'])
+                && array_key_exists('lat', $data['destination_location'])
+                && array_key_exists('lng', $data['destination_location'])
+            ) {
                 $destination = [
-                    'lat' => (float)$data['destination_lat'],
-                    'lng' => (float)$data['destination_lng'],
+                    'lat' => (float) $data['destination_location']['lat'],
+                    'lng' => (float) $data['destination_location']['lng'],
                 ];
                 $destinationLabel = $this->routingService->reverseGeocode(
-                    $destination['lat'], $destination['lng']
+                    $destination['lat'],
+                    $destination['lng']
                 );
-            } else {
-                $destination = $this->routingService->geocodeAddress($data['destination_address']);
-                $destinationLabel = $destination['label'];
+            }
+            elseif (!empty($data['destination_address'])) {
+                $destResult       = $this->routingService->geocodeAddress($data['destination_address']);
+                $destination      = [
+                    'lat' => (float) $destResult['lat'],
+                    'lng' => (float) $destResult['lng'],
+                ];
+                $destinationLabel = $destResult['label'];
+            }
+            else {
+                throw new \Exception("Missing destination data: must provide 'destination_location' or 'destination_address'.");
             }
 
-            // 3. Route summary
+            // ────────────────────────────────────────────────────────────
+            // 3) Route summary: distance, duration, geometry (LineString)
+            // ────────────────────────────────────────────────────────────
             $route = $this->routingService->getRouteDetails($pickup, $destination);
+            // $route should be something like:
+            // [
+            //   'distance' => <meters>,
+            //   'duration' => <seconds>,
+            //   'geometry' => [ [lng1,lat1], [lng2,lat2], … ]   // coordinates array
+            // ]
 
-            // 4. Persist with human labels
-            $attributes = [
-                'driver_id'           => $data['driver_id'],
-                'pickup_address'      => $pickupLabel,
-                'destination_address' => $destinationLabel,
-                'distance'            => $route['distance'],
-                'duration'            => $route['duration'],
-                'departure_time'      => Carbon::parse($data['departure_time'])->toDateTimeString(),
-                'available_seats'     => $data['available_seats'],
-                'price_per_seat'      => $data['price_per_seat'],
-                'vehicle_type'        => $data['vehicle_type'],
-                'notes'               => $data['notes'] ?? null,
+            // ────────────────────────────────────────────────────────────
+            // 4) Create the Ride model and fill non‐spatial fields
+            // ────────────────────────────────────────────────────────────
+            $ride = new Ride();
 
-                'pickup_location'      => DB::raw(sprintf(
-                    "ST_GeomFromText('POINT(%F %F)',4326)",
-                    $pickup['lng'], $pickup['lat']
-                )),
-                'destination_location' => DB::raw(sprintf(
-                    "ST_GeomFromText('POINT(%F %F)',4326)",
-                    $destination['lng'], $destination['lat']
-                )),
+            $ride->driver_id           = $data['driver_id'];
+            $ride->pickup_address      = $pickupLabel;
+            $ride->destination_address = $destinationLabel;
+            $ride->distance            = $route['distance'];
+            $ride->duration            = $route['duration'];
+            $ride->departure_time      = Carbon::parse($data['departure_time'])
+                ->toDateTimeString();
+            $ride->available_seats     = $data['available_seats'];
+            $ride->price_per_seat      = $data['price_per_seat'];
+            $ride->vehicle_type        = $data['vehicle_type'];
+            $ride->notes               = $data['notes'] ?? null;
+
+            // ────────────────────────────────────────────────────────────
+            // 5) Assign spatial columns via Eloquent mutators
+            //     (assuming Ride model has setPickupLocationAttribute & setDestinationLocationAttribute)
+            // ────────────────────────────────────────────────────────────
+            $ride->pickup_location = [
+                'lat' => $pickup['lat'],
+                'lng' => $pickup['lng'],
+            ];
+            $ride->destination_location = [
+                'lat' => $destination['lat'],
+                'lng' => $destination['lng'],
             ];
 
-            $ride = new Ride();
-            $ride->setRawAttributes($attributes, true);
+            // 6) Assign route_geometry as GeoJSON - WITH VALIDATION
+            if (isset($route['geometry']) && is_array($route['geometry']) && !empty($route['geometry'])) {
+                // Validate that coordinates are properly formatted
+                $validCoordinates = true;
+                foreach ($route['geometry'] as $coord) {
+                    if (!is_array($coord) || count($coord) < 2) {
+                        $validCoordinates = false;
+                        break;
+                    }
+                }
+
+                if ($validCoordinates) {
+                    $ride->route_geometry = [
+                        'type'        => 'LineString',
+                        'coordinates' => $route['geometry'],
+                    ];
+                } else {
+                    Log::warning('Invalid route geometry coordinates received', ['geometry' => $route['geometry']]);
+                    $ride->route_geometry = null;
+                }
+            } else {
+                Log::warning('No valid geometry data received from routing service');
+                $ride->route_geometry = null;
+            }
+
+            // ────────────────────────────────────────────────────────────
+            // 7) Save and return
+            // ────────────────────────────────────────────────────────────
             $ride->save();
             return $ride->fresh();
         });
@@ -105,7 +185,7 @@ class RideRepository implements RideRepositoryInterface
     /**
      * Get ride by ID.
      *
-     * @param  int  $rideId
+     * @param int $rideId
      * @return Ride
      * @throws ModelNotFoundException
      */
@@ -118,8 +198,8 @@ class RideRepository implements RideRepositoryInterface
     /**
      * Update a ride.
      *
-     * @param  int   $rideId
-     * @param  array $data
+     * @param int $rideId
+     * @param array $data
      * @return Ride
      * @throws \Exception
      */
@@ -168,19 +248,19 @@ class RideRepository implements RideRepositoryInterface
     /**
      * Delete a ride.
      *
-     * @param  int  $rideId
+     * @param int $rideId
      * @return bool
      */
     public function deleteRide(int $rideId): bool
     {
         Log::info('RideRepository: Deleting ride', ['ride_id' => $rideId]);
-        return (bool) Ride::destroy($rideId);
+        return (bool)Ride::destroy($rideId);
     }
 
     /**
      * Get rides for a specific driver.
      *
-     * @param  int  $userId
+     * @param int $userId
      * @return Collection
      */
     public function getDriverRides(int $userId): Collection
@@ -195,8 +275,8 @@ class RideRepository implements RideRepositoryInterface
     /**
      * Book seats on a ride.
      *
-     * @param  int   $rideId
-     * @param  array $bookingData
+     * @param int $rideId
+     * @param array $bookingData
      * @return Booking
      * @throws \Exception
      */
@@ -205,7 +285,7 @@ class RideRepository implements RideRepositoryInterface
         Log::info('RideRepository: Booking ride', [
             'ride_id' => $rideId,
             'user_id' => $bookingData['user_id'] ?? null,
-            'seats'   => $bookingData['seats']
+            'seats' => $bookingData['seats']
         ]);
 
         return DB::transaction(function () use ($rideId, $bookingData) {
@@ -219,7 +299,7 @@ class RideRepository implements RideRepositoryInterface
             $booking = Booking::create([
                 'user_id' => $bookingData['user_id'],
                 'ride_id' => $rideId,
-                'seats'   => $bookingData['seats'],
+                'seats' => $bookingData['seats'],
             ]);
 
             $ride->decrement('available_seats', $bookingData['seats']);
@@ -234,35 +314,86 @@ class RideRepository implements RideRepositoryInterface
     /**
      * Search rides based on criteria.
      *
-     * @param  array $criteria
+     * @param array $criteria
      * @return Collection
      */
-    public function searchRides(array $criteria): Collection
+    public function searchRides(array $params): Collection
     {
-        Log::info('RideRepository: Searching rides', $criteria);
+        $query = Ride::query()
+            ->whereDate('departure_time', '=', Carbon::parse($params['departure_date']))
+            ->where('available_seats', '>=', $params['seats_required'])
+            ->where('status', 'active');
 
-        $query = Ride::query()->with('driver.profile');
+        // Add spatial filters
+        $this->applySpatialFilters($query, $params);
 
-        if (!empty($criteria['from']['lat']) && !empty($criteria['from']['lng'])) {
-            $lat    = (float) $criteria['from']['lat'];
-            $lng    = (float) $criteria['from']['lng'];
-            $radius = ((int) ($criteria['radius'] ?? 10)) * 1000;
-            $point  = sprintf("POINT(%F %F)", $lng, $lat);
+        return $query->with('driver')->get();
+    }
 
-            $query->whereRaw(
-                "ST_Distance_Sphere(pickup_location, ST_GeomFromText(?,4326)) <= ?",
-                [$point, $radius]
-            );
-        }
+    private function applySpatialFilters(EloquentBuilder $query, array $params)
+    {
+        $maxDistance = 3 * 1000;
+        $srcWkt = sprintf('POINT(%F %F)', $params['source_lng'], $params['source_lat']);
+        $dstWkt = sprintf('POINT(%F %F)', $params['dest_lng'], $params['dest_lat']);
 
-        if (!empty($criteria['departure_after'])) {
-            $query->where('departure_time', '>=', Carbon::parse($criteria['departure_after'])->toDateTimeString());
-        }
+        $query->where(function ($q) use ($maxDistance, $srcWkt, $dstWkt) {
+            // Case A: endpoints within 3 km
+            $q->whereRaw(
+                "ST_Distance_Sphere(pickup_location, ST_GeomFromText(?, 4326)) <= ?",
+                [$srcWkt, $maxDistance]
+            )
+                ->whereRaw(
+                    "ST_Distance_Sphere(destination_location, ST_GeomFromText(?, 4326)) <= ?",
+                    [$dstWkt, $maxDistance]
+                )
 
-        if (!empty($criteria['seats'])) {
-            $query->where('available_seats', '>=', (int) $criteria['seats']);
-        }
+                // Case B: Route passes near both points using existing route_geometry
+                // BUT ONLY if route_geometry exists and is valid
+                ->orWhere(function ($q2) use ($srcWkt, $dstWkt) {
+                    $q2->whereNotNull('route_geometry')
+                        ->whereRaw("JSON_VALID(route_geometry)")
+                        // Additional check to ensure coordinates array exists
+                        ->whereRaw("JSON_EXTRACT(route_geometry, '$.coordinates') IS NOT NULL")
+                        ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates')) = 'ARRAY'")
+                        ->whereRaw(
+                            "ST_Contains(
+                            ST_Buffer(
+                                ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
+                                0.01
+                            ),
+                            ST_GeomFromText(?, 4326)
+                        )",
+                            [$srcWkt]
+                        )
+                        ->whereRaw(
+                            "ST_Contains(
+                            ST_Buffer(
+                                ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
+                                0.01
+                            ),
+                            ST_GeomFromText(?, 4326)
+                        )",
+                            [$dstWkt]
+                        );
+                });
+        });
+    }
+    // app/Repositories/RideRepository.php
+    public function cancelRide(int $rideId, int $driverId): Ride
+    {
+        return DB::transaction(function () use ($rideId, $driverId) {
+            $ride = Ride::where('driver_id', $driverId)
+                ->findOrFail($rideId);
 
-        return $query->orderBy('departure_time', 'asc')->get();
+            if ($ride->status === 'cancelled') {
+                throw new \Exception('Ride is already cancelled');
+            }
+
+            $ride->status = 'cancelled';
+            $ride->save();
+
+            Log::info('Ride cancelled', ['ride_id' => $rideId, 'driver_id' => $driverId]);
+            return $ride->fresh();
+        });
     }
 }

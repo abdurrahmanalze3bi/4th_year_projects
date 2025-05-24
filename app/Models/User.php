@@ -5,6 +5,8 @@ namespace App\Models;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use App\Notifications\CustomResetPassword;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -74,6 +76,18 @@ class User extends Authenticatable
     public function bookings() {
         return $this->hasMany(Booking::class);
     }
+    // Add these relationships to your User model
+    public function conversations(): BelongsToMany
+    {
+        return $this->belongsToMany(Conversation::class, 'conversation_participants')
+            ->withPivot(['role', 'joined_at', 'last_read_at'])
+            ->withTimestamps();
+    }
+
+    public function sentMessages(): HasMany
+    {
+        return $this->hasMany(Message::class, 'sender_id');
+    }
     /*protected static function booted()
     {
         static::created(function (User $user) {
@@ -84,4 +98,36 @@ class User extends Authenticatable
             ]);
         });
     }*/
+
+    public function notifications()
+    {
+        return $this->belongsToMany(Notification::class, 'user_notifications')
+            ->withPivot('read_at')
+            ->withTimestamps();
+    }
+
+    public function userNotifications()
+    {
+        return $this->hasMany(UserNotification::class);
+    }
+
+    public function pushTokens()
+    {
+        return $this->hasMany(PushNotificationToken::class);
+    }
+
+    public function unreadNotifications()
+    {
+        return $this->userNotifications()->unread()->with('notification');
+    }
+
+    public function getUnreadNotificationCountAttribute()
+    {
+        return $this->userNotifications()->unread()->count();
+    }
+
+    public function getUnreadNotificationsCountAttribute()
+    {
+        return $this->notifications()->whereNull('read_at')->count();
+    }
 }

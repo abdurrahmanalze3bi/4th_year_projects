@@ -1,11 +1,17 @@
 <?php
 
+use App\Http\Controllers\API\NotificationController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\Auth\GoogleController;
 
 Route::get('/', function () {
     return view('welcome');
+});
+Route::middleware('auth')->group(function () {
+    Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
+    Route::post('/notifications/{id}/read', [NotificationController::class, 'markAsRead'])->name('notifications.read');
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllAsRead'])->name('notifications.readAll');
 });
 
 // Google OAuth
@@ -33,4 +39,5 @@ Route::get('/env-test', function() {
         'env_key' => env('OPENROUTE_API_KEY'),
         'config_key' => config('services.openroute.api_key')
     ];
+
 });

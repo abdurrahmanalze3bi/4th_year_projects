@@ -13,6 +13,7 @@ return new class extends Migration
     {
         // bookings table migration
         Schema::create('bookings', function (Blueprint $table) {
+            $table->engine = 'InnoDB';
             $table->id();
             $table->foreignId('ride_id')->constrained();
             $table->foreignId('user_id')->constrained();

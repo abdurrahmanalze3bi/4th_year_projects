@@ -14,6 +14,7 @@ return new class extends Migration
     public function up()
     {
         Schema::table('rides', function (Blueprint $table) {
+            $table->engine = 'InnoDB';
             // Drop existing spatial columns
             $table->dropColumn(['pickup_location', 'destination_location']);
         });

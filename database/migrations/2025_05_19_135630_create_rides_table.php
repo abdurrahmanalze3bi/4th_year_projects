@@ -6,21 +6,30 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    // database/migrations/YYYY_MM_DD_create_rides_table.php
-
     public function up(): void
     {
         Schema::create('rides', function (Blueprint $table) {
+            // ────────────────────────────────────────
+            // Force InnoDB so spatial indexes AND foreign keys will work
+            // ────────────────────────────────────────
+            $table->engine = 'InnoDB';
+
             $table->id();
-            $table->foreignId('driver_id')->constrained('users')->onDelete('cascade');
+
+            // Foreign key to users; users must already be InnoDB
+            $table->foreignId('driver_id')
+                ->constrained('users')
+                ->onDelete('cascade');
 
             // Address Information
             $table->string('pickup_address', 255);
             $table->string('destination_address', 255);
 
-            // Spatial Columns (no lat/lng columns)
-            $table->point('pickup_location');
-            $table->point('destination_location');
+            // ────────────────────────────────────────
+            // Spatial Columns: NOT NULL is required for SPATIAL indexes
+            // ────────────────────────────────────────
+            $table->point('pickup_location');       // NOT NULL by default
+            $table->point('destination_location');  // NOT NULL by default
 
             // Route Data
             $table->unsignedInteger('distance')->comment('Meters');
@@ -42,6 +51,7 @@ return new class extends Migration
             $table->timestamps();
         });
     }
+
     public function down(): void
     {
         Schema::dropIfExists('rides');

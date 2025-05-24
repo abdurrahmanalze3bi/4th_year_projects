@@ -1,7 +1,10 @@
 <?php
-
+namespace App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\Auth\GoogleController;
+use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
+use App\Http\Controllers\API\NotificationController;
+
 use App\Http\Controllers\API\RideController;
 use App\Http\Controllers\API\VerificationController;
 use Illuminate\Http\Request;
@@ -40,7 +43,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     // Profile routes
-    Route::prefix('profile')->group(function () {
+        Route::prefix('profile')->group(function () {
         Route::post('/documents', [DocumentController::class, 'store']);
         Route::post('/verify/passenger', [VerificationController::class, 'verifyPassenger']);
         Route::post('/verify/driver', [VerificationController::class, 'verifyDriver']);
@@ -55,7 +58,30 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
     Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
     Route::get('/autocomplete', [RideController::class, 'autocomplete']);
+    Route::post('/rides/search', [RideController::class, 'searchRides']);
+    Route::patch('/rides/{ride}/cancel', [RideController::class, 'cancelRide']);
 
+
+        Route::prefix('chat')->group(function () {
+        Route::get('/conversations', [ChatController::class, 'getConversations']);
+        Route::post('/conversations', [ChatController::class, 'startConversation']);
+        Route::get('/conversations/{conversationId}/messages', [ChatController::class, 'getMessages']);
+        Route::post('/conversations/{conversationId}/messages', [ChatController::class, 'sendMessage']);
+        Route::delete('/messages/{messageId}', [ChatController::class, 'deleteMessage']);
+
+
+
+
+    });
+        Route::prefix('notifications')->group(function () {
+        Route::get('/', [NotificationController::class, 'index']);
+        Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
+        Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
+        Route::post('/read-all', [NotificationController::class, 'markAllAsRead']);
+        Route::delete('/{id}', [NotificationController::class, 'destroy']);
+        Route::get('/categories', [NotificationController::class, 'getCategories']);
+        Route::post('/bulk-action', [NotificationController::class, 'bulkAction']);
+    });
 });
 
     // other auth’d routes…
