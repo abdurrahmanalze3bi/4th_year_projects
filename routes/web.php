@@ -2,11 +2,20 @@
 
 use App\Http\Controllers\API\NotificationController;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\Auth\GoogleController;
 
 Route::get('/', function () {
     return view('welcome');
+});
+Route::get('/test-db', function () {
+    try {
+        DB::connection()->getPdo();
+        return response()->json(['status' => 'Database connected successfully!']);
+    } catch (\Exception $e) {
+        return response()->json(['error' => 'Database connection failed: ' . $e->getMessage()]);
+    }
 });
 Route::middleware('auth')->group(function () {
     Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
