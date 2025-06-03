@@ -2,35 +2,50 @@
 
 namespace App\Events;
 
+use App\Models\Ride;
+use App\Models\User;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Broadcasting\InteractsWithSockets;
-use Illuminate\Broadcasting\PresenceChannel;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class RideCancelled
+class RideCancelled implements ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
-    /**
-     * Create a new event instance.
-     */
-    public function __construct()
+    public $ride;
+    public $bookings;
+    public $user;
+
+    public function __construct(Ride $ride, array $bookings, User $user)
     {
-        //
+        $this->ride = $ride;
+        $this->bookings = $bookings;
+        $this->user = $user;
     }
 
-    /**
-     * Get the channels the event should broadcast on.
-     *
-     * @return array<int, \Illuminate\Broadcasting\Channel>
-     */
     public function broadcastOn(): array
     {
         return [
-            new PrivateChannel('channel-name'),
+            new Channel('rides'),
+            new PrivateChannel('user.'.$this->user->id)
+        ];
+    }
+
+    public function broadcastAs()
+    {
+        return 'ride.cancelled';
+    }
+
+    public function broadcastWith(): array
+    {
+        return [
+            'ride_id' => $this->ride->id,
+            'driver' => $this->user->only(['id', 'name']),
+            'affected_bookings' => count($this->bookings),
+            'cancellation_time' => now()->toISOString()
         ];
     }
 }
