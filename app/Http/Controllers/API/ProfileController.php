@@ -7,9 +7,11 @@ use App\Interfaces\ProfileRepositoryInterface;
 use App\Interfaces\PhotoRepositoryInterface;
 use App\Models\ProfileComment;
 use App\Models\Profile;
+use App\Models\UserRating;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 
 class ProfileController extends Controller
 {
@@ -189,6 +191,86 @@ class ProfileController extends Controller
     }
 
     /**
+     * Rate a user
+     * POST /api/profile/{userId}/rate
+     */
+    public function rateUser(Request $request, int $userId)
+    {
+        $user = $request->user();
+
+        if ($user->id === $userId) {
+            return response()->json([
+                'success' => false,
+                'message' => "You can't rate yourself.",
+            ], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'rating' => 'required|numeric|min:1|max:5',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        // Check if rated user exists
+        $ratedUser = \App\Models\User::find($userId);
+        if (!$ratedUser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found',
+            ], 404);
+        }
+
+        try {
+            // Update or create rating
+            UserRating::updateOrCreate(
+                [
+                    'rater_id' => $user->id,
+                    'rated_user_id' => $userId,
+                ],
+                [
+                    'rating' => $request->input('rating'),
+                ]
+            );
+
+            // Get updated rating stats
+            $ratingStats = $this->getUserRatingStats($userId);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Rating submitted successfully',
+                'data' => $ratingStats,
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error("Rating error: {$e->getMessage()}");
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to submit rating',
+            ], 500);
+        }
+    }
+
+    /**
+     * Get user rating statistics
+     */
+    private function getUserRatingStats(int $userId): array
+    {
+        $stats = UserRating::where('rated_user_id', $userId)
+            ->selectRaw('COUNT(*) as total_ratings, AVG(rating) as average_rating')
+            ->first();
+
+        return [
+            'total_ratings' => (int) ($stats->total_ratings ?? 0),
+            'average_rating' => $stats->average_rating ? round($stats->average_rating, 2) : 0,
+        ];
+    }
+
+    /**
      * Format a single comment
      */
     private function formatComment(ProfileComment $comment): array
@@ -216,13 +298,18 @@ class ProfileController extends Controller
      */
     private function formatProfileData($profile, $user): array
     {
+        // Changed from collection to array format (map instead of list)
         $docs = $this->photoRepo
             ->getUserDocumentsByType($user->id, ['face_id', 'back_id', 'license', 'mechanic_card'])
-            ->mapWithKeys(fn($d) => ["{$d->type}_pic" => asset("storage/{$d->path}")]);
+            ->mapWithKeys(fn($d) => ["{$d->type}_pic" => asset("storage/{$d->path}")])
+            ->toArray(); // Convert to array for consistent map format
 
         $comments = collect($profile->comments ?? [])
             ->map(fn($c) => $this->formatComment($c))
             ->all();
+
+        // Get rating statistics
+        $ratingStats = $this->getUserRatingStats($user->id);
 
         return [
             'user_id'            => $user->id,
@@ -243,8 +330,9 @@ class ProfileController extends Controller
             'radio'              => $profile->radio,
             'smoking'            => $profile->smoking,
             'number_of_rides'    => $profile->number_of_rides,
-            'documents'          => $docs,
+            'documents'          => $docs, // Now returns as map/object instead of list
             'comments'           => $comments,
+            'rating'             => $ratingStats, // Added rating statistics
         ];
     }
 }

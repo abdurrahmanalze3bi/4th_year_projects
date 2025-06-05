@@ -41,8 +41,8 @@ class VerificationController extends Controller
             }
 
             $validator = Validator::make($request->all(), [
-                'face_id_pic' => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-                'back_id_pic' => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
+                'face_id_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+                'back_id_pic' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             ]);
 
             if ($validator->fails()) {
@@ -53,23 +53,45 @@ class VerificationController extends Controller
             }
 
             try {
-                // ─── EXACTLY match your ENUM('face_id','back_id','license','mechanic_card') ───
+                // Get or create user profile
+                $profile = $this->profileRepo->getProfileByUserId($user->id);
+                if (!$profile) {
+                    // Create basic profile if it doesn't exist
+                    $this->profileRepo->updateProfile($user->id, []);
+                    $profile = $this->profileRepo->getProfileByUserId($user->id);
+                }
+
+                // EXACTLY match your ENUM('face_id','back_id','license','mechanic_card')
                 $allowedTypes = [
                     'face_id_pic' => 'face_id',
                     'back_id_pic' => 'back_id',
                 ];
 
-                foreach (['face_id_pic', 'back_id_pic'] as $field) {
-                    $path    = $request->file($field)->store('verifications', 'public');
-                    $docType = $allowedTypes[$field]; // 'face_id' or 'back_id'
+                $profileData = []; // Data to update in profiles table
 
-                    // Delete any existing document of that ENUM-type
-                    $this->photoRepo->deleteDocumentsByType($user->id, $docType);
-                    // Store new row: type will be exactly 'face_id' or 'back_id'
-                    $this->photoRepo->storeDocument($user->id, $docType, $path);
+                foreach (['face_id_pic', 'back_id_pic'] as $field) {
+                    // Only process if file is present
+                    if ($request->hasFile($field)) {
+                        $path    = $request->file($field)->store('verifications', 'public');
+                        $docType = $allowedTypes[$field]; // 'face_id' or 'back_id'
+
+                        // Delete any existing document of that ENUM-type
+                        $this->photoRepo->deleteDocumentsByType($user->id, $docType);
+
+                        // Store new row: type will be exactly 'face_id' or 'back_id'
+                        $this->photoRepo->storeDocument($user->id, $docType, $path);
+
+                        // Also prepare data for profiles table
+                        $profileData[$field] = $path;
+                    }
                 }
 
-                // Mark user as “pending” passenger verification
+                // Update profile table with photo paths (only if we have data)
+                if (!empty($profileData)) {
+                    $this->profileRepo->updateProfile($profile->id, $profileData);
+                }
+
+                // Mark user as "pending" passenger verification
                 $user->update(['verification_status' => 'pending']);
                 $user = $user->fresh();
 
@@ -106,14 +128,14 @@ class VerificationController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'face_id_pic'          => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'back_id_pic'          => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'driving_license_pic'  => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'mechanic_card_pic'    => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'car_pic'              => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'type_of_car'          => 'required|string|max:255',
-            'color_of_car'         => 'required|string|max:50',
-            'number_of_seats'      => 'required|integer|min:1|max:12',
+            'face_id_pic'          => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'back_id_pic'          => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'driving_license_pic'  => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'mechanic_card_pic'    => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'car_pic'              => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'type_of_car'          => 'nullable|string|max:255',
+            'color_of_car'         => 'nullable|string|max:50',
+            'number_of_seats'      => 'nullable|integer|min:1|max:12',
         ]);
 
         if ($validator->fails()) {
@@ -124,53 +146,80 @@ class VerificationController extends Controller
         }
 
         try {
-            $userId  = $user->id;
-            $profile = $this->profileRepo->getProfileByUserId($userId);
+            return DB::transaction(function () use ($request, $user) {
+                $userId  = $user->id;
+                $profile = $this->profileRepo->getProfileByUserId($userId);
 
-            if (! $profile) {
+                if (!$profile) {
+                    // Create basic profile if it doesn't exist
+                    $this->profileRepo->updateProfile($userId, []);
+                    $profile = $this->profileRepo->getProfileByUserId($userId);
+                }
+
+                // EXACTLY match the ENUM('face_id','back_id','license','mechanic_card')
+                $allowedTypes = [
+                    'face_id_pic'         => 'face_id',
+                    'back_id_pic'         => 'back_id',
+                    'driving_license_pic' => 'license',
+                    'mechanic_card_pic'   => 'mechanic_card',
+                ];
+
+                $profileData = []; // Data to update in profiles table
+
+                foreach (['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic'] as $field) {
+                    // Only process if file is present
+                    if ($request->hasFile($field)) {
+                        $path    = $request->file($field)->store('verifications', 'public');
+                        $docType = $allowedTypes[$field]; // one of 'face_id', 'back_id', 'license', 'mechanic_card'
+
+                        // Remove any existing photo rows with that EXACT type
+                        $this->photoRepo->deleteDocumentsByType($userId, $docType);
+
+                        // Save new row: photos.type = 'license' or 'mechanic_card', etc.
+                        $this->photoRepo->storeDocument($userId, $docType, $path);
+
+                        // Also prepare data for profiles table
+                        $profileData[$field] = $path;
+                    }
+                }
+
+                // Vehicle info (including car_pic)
+                $vehicleData = [];
+
+                if ($request->hasFile('car_pic')) {
+                    $carPicPath = $request->file('car_pic')->store('verifications', 'public');
+                    $vehicleData['car_pic'] = $carPicPath;
+                }
+
+                // Add other vehicle data if provided
+                if ($request->filled('type_of_car')) {
+                    $vehicleData['type_of_car'] = $request->input('type_of_car');
+                }
+
+                if ($request->filled('color_of_car')) {
+                    $vehicleData['color_of_car'] = $request->input('color_of_car');
+                }
+
+                if ($request->filled('number_of_seats')) {
+                    $vehicleData['number_of_seats'] = $request->input('number_of_seats');
+                }
+
+                // Merge all profile data (photos + vehicle info)
+                $allProfileData = array_merge($profileData, $vehicleData);
+
+                // Update profile table with all data (only if we have data)
+                if (!empty($allProfileData)) {
+                    $this->profileRepo->updateProfile($profile->id, $allProfileData);
+                }
+
+                // Mark user as "pending" driver verification
+                $user->update(['verification_status' => 'pending']);
+
                 return response()->json([
-                    'success' => false,
-                    'message' => 'Complete your profile before driver verification'
-                ], 400);
-            }
-
-            // ─── EXACTLY match the ENUM('face_id','back_id','license','mechanic_card') ───
-            $allowedTypes = [
-                'face_id_pic'         => 'face_id',
-                'back_id_pic'         => 'back_id',
-                'driving_license_pic' => 'license',
-                'mechanic_card_pic'   => 'mechanic_card',
-            ];
-
-            foreach (
-                ['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic']
-                as $field
-            ) {
-                $path    = $request->file($field)->store('verifications', 'public');
-                $docType = $allowedTypes[$field]; // one of 'face_id', 'back_id', 'license', 'mechanic_card'
-
-                // Remove any existing photo rows with that EXACT type
-                $this->photoRepo->deleteDocumentsByType($userId, $docType);
-                // Save new row: photos.type = 'license' or 'mechanic_card', etc.
-                $this->photoRepo->storeDocument($userId, $docType, $path);
-            }
-
-            // Vehicle info (unchanged)
-            $vehicleData = [
-                'car_pic'         => $request->file('car_pic')->store('verifications', 'public'),
-                'type_of_car'     => $request->input('type_of_car'),
-                'color_of_car'    => $request->input('color_of_car'),
-                'number_of_seats'=> $request->input('number_of_seats'),
-            ];
-            $this->profileRepo->updateProfile($profile->id, $vehicleData);
-
-            // Mark user as “pending” driver verification
-            $user->update(['verification_status' => 'pending']);
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Driver verification request submitted for review'
-            ], 201);
+                    'success' => true,
+                    'message' => 'Driver verification request submitted for review'
+                ], 201);
+            });
 
         } catch (\Exception $e) {
             return response()->json([
@@ -188,6 +237,7 @@ class VerificationController extends Controller
     {
         try {
             $user = User::findOrFail($userId);
+
             $statusLabels = [
                 'none'     => 'not_verified',
                 'pending'  => 'pending',
@@ -197,7 +247,6 @@ class VerificationController extends Controller
 
             // Request exactly the ENUM values: face_id, back_id, license, mechanic_card
             $enumTypes = ['face_id', 'back_id', 'license', 'mechanic_card'];
-
             $documents = $this->photoRepo
                 ->getUserDocumentsByType($userId, $enumTypes)
                 ->mapWithKeys(fn($doc) => [

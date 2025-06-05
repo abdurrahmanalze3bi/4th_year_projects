@@ -130,4 +130,32 @@ class User extends Authenticatable
     {
         return $this->notifications()->whereNull('read_at')->count();
     }
+    public function givenRatings()
+    {
+        return $this->hasMany(UserRating::class, 'rater_id');
+    }
+
+    /**
+     * Ratings received by this user
+     */
+    public function receivedRatings()
+    {
+        return $this->hasMany(UserRating::class, 'rated_user_id');
+    }
+
+    /**
+     * Get average rating for this user
+     */
+    public function getAverageRatingAttribute()
+    {
+        return $this->receivedRatings()->avg('rating') ?? 0;
+    }
+
+    /**
+     * Get total ratings count for this user
+     */
+    public function getTotalRatingsAttribute()
+    {
+        return $this->receivedRatings()->count();
+    }
 }

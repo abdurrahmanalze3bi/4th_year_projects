@@ -43,7 +43,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     // Profile routes
-        Route::prefix('profile')->group(function () {
+    Route::prefix('profile')->group(function () {
         Route::post('/documents', [DocumentController::class, 'store']);
         Route::post('/verify/passenger', [VerificationController::class, 'verifyPassenger']);
         Route::post('/verify/driver', [VerificationController::class, 'verifyDriver']);
@@ -51,6 +51,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/profile/verify/status/{userId}', [VerificationController::class, 'status']);
         Route::post('/', [\App\Http\Controllers\API\ProfileController::class, 'update']);
         Route::post('/{userId}/comments', [\App\Http\Controllers\API\ProfileController::class, 'comment']);
+        Route::post('/{userId}/rate', [\App\Http\Controllers\API\ProfileController::class, 'rateUser']); // New rating endpoint
     });
 
     Route::post('/rides', [RideController::class, 'createRide']);
@@ -62,7 +63,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/rides/{ride}/cancel', [RideController::class, 'cancelRide']);
 
 
-        Route::prefix('chat')->group(function () {
+    Route::prefix('chat')->group(function () {
         Route::get('/conversations', [ChatController::class, 'getConversations']);
         Route::post('/conversations', [ChatController::class, 'startConversation']);
         Route::get('/conversations/{conversationId}/messages', [ChatController::class, 'getMessages']);
@@ -73,7 +74,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     });
-        Route::prefix('notifications')->group(function () {
+    Route::prefix('notifications')->group(function () {
         Route::get('/', [NotificationController::class, 'index']);
         Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
         Route::post('/{id}/read', [NotificationController::class, 'markAsRead']);
@@ -84,6 +85,5 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 });
 
-    // other auth’d routes…
-    Route::get('/user',    fn(Request $r) => $r->user());
-
+// other auth'd routes…
+Route::get('/user',    fn(Request $r) => $r->user());
