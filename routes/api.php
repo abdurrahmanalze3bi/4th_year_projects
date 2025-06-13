@@ -70,7 +70,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/conversations/{conversationId}/messages', [ChatController::class, 'sendMessage']);
         Route::delete('/messages/{messageId}', [ChatController::class, 'deleteMessage']);
 
-
+        Route::delete('/messakges/{messageId}', [ChatController::class, 'deleteMessage']);
 
 
     });
