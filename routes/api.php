@@ -1,20 +1,21 @@
 <?php
-namespace App\Http\Controllers\API\NotificationController;
+
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
 use App\Http\Controllers\API\NotificationController;
-
 use App\Http\Controllers\API\RideController;
 use App\Http\Controllers\API\VerificationController;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\SignupController;
 use App\Http\Controllers\API\LoginController;
 use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\ForgotPasswordController;
 use App\Http\Controllers\API\ResetPasswordController;
 use App\Http\Controllers\API\ProfileController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Route;
+
 /*
 |--------------------------------------------------------------------------
 | API Routes
@@ -24,56 +25,83 @@ use App\Http\Controllers\API\ProfileController;
 | routes are loaded by the RouteServiceProvider and all of them will
 | be assigned to the "api" middleware group. Make something great!
 |
-*/// routes/api.php
+*/
 
-// Public routes…
-Route::post('/signup',    [SignupController::class, 'register']);
-Route::post('/login',     LoginController::class);
-// …
-// Add this to your public routes
-Route::post('/reset-password', \App\Http\Controllers\API\ResetPasswordController::class);
-Route::post('/forgot-password', \App\Http\Controllers\API\ForgotPasswordController::class);
+// Database connection test route
+Route::get('test-db', function() {
+    try {
+        DB::connection()->getPdo();
+        $tables = DB::select('SHOW TABLES');
+        return response()->json([
+            'message' => 'Database connection successful',
+            'database' => config('database.connections.mysql.database'),
+            'host' => config('database.connections.mysql.host'),
+            'tables_count' => count($tables)
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'error' => 'Database connection failed: ' . $e->getMessage(),
+            'config' => [
+                'host' => config('database.connections.mysql.host'),
+                'database' => config('database.connections.mysql.database'),
+                'port' => config('database.connections.mysql.port')
+            ]
+        ], 500);
+    }
+});
+
+// Public routes
+Route::post('/signup', [SignupController::class, 'register']);
+Route::post('/login', [LoginController::class, '__invoke']);
+Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
+Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
+
+// Test route for basic API functionality
+Route::get('/test', function() {
+    return response()->json(['message' => 'API is working!', 'timestamp' => now()]);
+});
+
 // Authenticated routes
 Route::middleware('auth:sanctum')->group(function () {
-    // Protected routes
+    // User info
     Route::get('/user', fn(Request $r) => $r->user());
-    Route::post('/logout', \App\Http\Controllers\API\LogoutController::class);
-
-
-
+    Route::post('/logout', [LogoutController::class, '__invoke']);
 
     // Profile routes
     Route::prefix('profile')->group(function () {
+        Route::get('/', [ProfileController::class, 'show']);
+        Route::post('/', [ProfileController::class, 'update']);
         Route::post('/documents', [DocumentController::class, 'store']);
         Route::post('/verify/passenger', [VerificationController::class, 'verifyPassenger']);
         Route::post('/verify/driver', [VerificationController::class, 'verifyDriver']);
-        Route::get('/', [\App\Http\Controllers\API\ProfileController::class, 'show']);
-        Route::get('/profile/verify/status/{userId}', [VerificationController::class, 'status']);
-        Route::post('/', [\App\Http\Controllers\API\ProfileController::class, 'update']);
-        Route::post('/{userId}/comments', [\App\Http\Controllers\API\ProfileController::class, 'comment']);
-        Route::post('/{userId}/rate', [\App\Http\Controllers\API\ProfileController::class, 'rateUser']); // New rating endpoint
+        Route::get('/verify/status/{userId}', [VerificationController::class, 'status']);
+        Route::post('/{userId}/comments', [ProfileController::class, 'comment']);
+        Route::post('/{userId}/rate', [ProfileController::class, 'rateUser']);
     });
 
-    Route::post('/rides', [RideController::class, 'createRide']);
-    Route::get('/rides', [RideController::class, 'getRides']);
-    Route::get('/rides/{rideId}', [RideController::class, 'getRideDetails']);
-    Route::post('/rides/{rideId}/book', [RideController::class, 'bookRide']);
+    // Ride routes
+    Route::prefix('rides')->group(function () {
+        Route::post('/', [RideController::class, 'createRide']);
+        Route::get('/', [RideController::class, 'getRides']);
+        Route::get('/{rideId}', [RideController::class, 'getRideDetails']);
+        Route::post('/{rideId}/book', [RideController::class, 'bookRide']);
+        Route::patch('/{ride}/cancel', [RideController::class, 'cancelRide']);
+        Route::post('/search', [RideController::class, 'searchRides']);
+    });
+
+    // Autocomplete route (separate from rides)
     Route::get('/autocomplete', [RideController::class, 'autocomplete']);
-    Route::post('/rides/search', [RideController::class, 'searchRides']);
-    Route::patch('/rides/{ride}/cancel', [RideController::class, 'cancelRide']);
 
-
+    // Chat routes
     Route::prefix('chat')->group(function () {
         Route::get('/conversations', [ChatController::class, 'getConversations']);
         Route::post('/conversations', [ChatController::class, 'startConversation']);
         Route::get('/conversations/{conversationId}/messages', [ChatController::class, 'getMessages']);
         Route::post('/conversations/{conversationId}/messages', [ChatController::class, 'sendMessage']);
         Route::delete('/messages/{messageId}', [ChatController::class, 'deleteMessage']);
-
-        Route::delete('/messakges/{messageId}', [ChatController::class, 'deleteMessage']);
-
-
     });
+
+    // Notification routes
     Route::prefix('notifications')->group(function () {
         Route::get('/', [NotificationController::class, 'index']);
         Route::get('/unread-count', [NotificationController::class, 'getUnreadCount']);
@@ -84,6 +112,3 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/bulk-action', [NotificationController::class, 'bulkAction']);
     });
 });
-
-// other auth'd routes…
-Route::get('/user',    fn(Request $r) => $r->user());

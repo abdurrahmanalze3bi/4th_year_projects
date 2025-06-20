@@ -40,7 +40,6 @@ class RideController extends Controller
     {
         $user = $request->user();
 
-        // Only verified drivers
         if (! $user->is_verified_driver) {
             return response()->json([
                 'success' => false,
@@ -48,10 +47,8 @@ class RideController extends Controller
             ], 403);
         }
 
-        // Validate driver profile
         $this->validateDriverProfile($user);
 
-        // Validate input: require either address or coordinates for each end
         $validator = Validator::make($request->all(), [
             'pickup_address'       => 'required_without:pickup_lat|string|max:255',
             'pickup_lat'           => 'required_without:pickup_address|numeric',
@@ -62,7 +59,7 @@ class RideController extends Controller
             'departure_time'       => 'required|date|after:now',
             'available_seats'      => 'required|integer|min:1',
             'price_per_seat'       => 'required|numeric|min:0',
-            'vehicle_type'         => 'required|string|max:50',
+            // REMOVED: vehicle_type validation
             'notes'                => 'nullable|string|max:500',
         ]);
 
@@ -76,7 +73,6 @@ class RideController extends Controller
         try {
             DB::beginTransaction();
 
-            // Determine pickup data
             if ($request->filled('pickup_address')) {
                 $pickup = $this->geo->geocodeAddress($request->input('pickup_address'));
             } else {
@@ -87,7 +83,6 @@ class RideController extends Controller
                 ];
             }
 
-            // Determine destination data
             if ($request->filled('destination_address')) {
                 $destination = $this->geo->geocodeAddress($request->input('destination_address'));
             } else {
@@ -98,7 +93,6 @@ class RideController extends Controller
                 ];
             }
 
-            // Assemble payload for repository
             $data = [
                 'driver_id'           => $user->id,
                 'pickup_address'      => $request->input('pickup_address') ?? $pickup['label'],
@@ -114,17 +108,20 @@ class RideController extends Controller
                 'departure_time'      => $request->input('departure_time'),
                 'available_seats'     => $request->input('available_seats'),
                 'price_per_seat'      => $request->input('price_per_seat'),
-                'vehicle_type'        => $request->input('vehicle_type'),
+                // Use vehicle type from driver's profile
+                'vehicle_type'        => $user->profile->type_of_car,
                 'notes'               => $request->input('notes'),
             ];
 
-            // Create the ride
             $ride = $this->rideRepository->createRide($data);
 
-            // Send notifications to nearby passengers
+            // Automatically increment ride count
+            $driverProfile = $user->profile;
+            $driverProfile->number_of_rides = $driverProfile->number_of_rides + 1;
+            $driverProfile->save();
+
             $this->notifyNearbyPassengers($ride, $pickup, $destination);
 
-            // Send confirmation notification to driver
             $this->notificationService->createNotification(
                 $user,
                 'ride_created',
@@ -140,7 +137,6 @@ class RideController extends Controller
                 'ride'
             );
 
-            // Broadcast ride created event
             broadcast(new RideCreated($ride));
 
             DB::commit();
@@ -149,7 +145,9 @@ class RideController extends Controller
                 'ride_id' => $ride->id,
                 'driver_id' => $user->id,
                 'pickup' => $ride->pickup_address,
-                'destination' => $ride->destination_address
+                'destination' => $ride->destination_address,
+                'new_ride_count' => $driverProfile->number_of_rides,
+                'vehicle_type' => $user->profile->type_of_car
             ]);
 
             return response()->json([

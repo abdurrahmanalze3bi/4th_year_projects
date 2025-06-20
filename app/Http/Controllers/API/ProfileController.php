@@ -69,7 +69,6 @@ class ProfileController extends Controller
             'number_of_seats'      => 'nullable|integer|min:1|max:12',
             'radio'                => 'nullable|boolean',
             'smoking'              => 'nullable|boolean',
-            'number_of_rides'      => 'nullable|integer|min:0',
             'profile_photo'        => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'car_pic'              => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'face_id_pic'          => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
@@ -85,16 +84,19 @@ class ProfileController extends Controller
             ], 422);
         }
 
-        // Collect validated data
         $data = $validator->validated();
-        // Normalize preference & ride count
-        $data['radio'] = $request->has('radio') ? (bool) $request->input('radio') : ($data['radio'] ?? null);
-        $data['smoking'] = $request->has('smoking') ? (bool) $request->input('smoking') : ($data['smoking'] ?? null);
-        if ($request->has('number_of_rides')) {
-            $data['number_of_rides'] = (int) $request->input('number_of_rides');
+
+        // Block manual ride count updates
+        if (isset($data['number_of_rides'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Ride count cannot be updated manually. It is automatically incremented when you create rides.'
+            ], 422);
         }
 
-        // Prevent critical changes during pending verification
+        $data['radio'] = $request->has('radio') ? (bool) $request->input('radio') : ($data['radio'] ?? null);
+        $data['smoking'] = $request->has('smoking') ? (bool) $request->input('smoking') : ($data['smoking'] ?? null);
+
         $critical = ['first_name', 'last_name', 'type_of_car', 'color_of_car', 'number_of_seats'];
         if ($user->verification_status === 'pending' && count(array_intersect(array_keys($data), $critical)) > 0) {
             return response()->json([
@@ -103,7 +105,6 @@ class ProfileController extends Controller
             ], 403);
         }
 
-        // Setup document mapping
         $docTypeMap = [
             'face_id_pic'         => 'face_id',
             'back_id_pic'         => 'back_id',
@@ -112,7 +113,6 @@ class ProfileController extends Controller
         ];
         $fileFields = array_merge(['profile_photo', 'car_pic'], array_keys($docTypeMap));
 
-        // Handle file uploads
         foreach ($fileFields as $field) {
             if (! $request->hasFile($field)) {
                 continue;
@@ -121,10 +121,8 @@ class ProfileController extends Controller
             $disk = isset($docTypeMap[$field]) ? 'verifications' : 'profiles';
             $path = $request->file($field)->store($disk, 'public');
 
-            // Store in profiles table data
             $data[$field] = $path;
 
-            // Sync into verifications if needed
             if (isset($docTypeMap[$field])) {
                 $type = $docTypeMap[$field];
                 $this->photoRepo->deleteDocumentsByType($user->id, $type);
