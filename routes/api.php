@@ -69,7 +69,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Profile routes
     Route::prefix('profile')->group(function () {
-        Route::get('/', [ProfileController::class, 'show']);
+        Route::get('/{userId}', [ProfileController::class, 'show']);
         Route::post('/', [ProfileController::class, 'update']);
         Route::post('/documents', [DocumentController::class, 'store']);
         Route::post('/verify/passenger', [VerificationController::class, 'verifyPassenger']);
@@ -87,6 +87,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{rideId}/book', [RideController::class, 'bookRide']);
         Route::patch('/{ride}/cancel', [RideController::class, 'cancelRide']);
         Route::post('/search', [RideController::class, 'searchRides']);
+
+        // Add these CORRECTLY inside the prefix group
+        Route::post('/route-options', [RideController::class, 'getRouteOptions']);
+        Route::post('/create-with-route', [RideController::class, 'createRideWithRoute']);
     });
 
     // Autocomplete route (separate from rides)

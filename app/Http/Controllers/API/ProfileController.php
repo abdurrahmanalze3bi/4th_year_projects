@@ -30,23 +30,25 @@ class ProfileController extends Controller
      * Get user profile
      * GET /api/profile
      */
-    public function show(Request $request)
+    // ProfileController.php
+    public function show(Request $request, $userId)
     {
         try {
-            $user    = $request->user();
-            $profile = $this->profileRepo->getProfileWithUser($user->id);
+            $authUser = $request->user();
+            $profile = $this->profileRepo->getProfileWithUser($userId);
+            $isOwner = ($authUser->id == $userId);
 
             return response()->json([
                 'success' => true,
-                'data'    => $this->formatProfileData($profile, $user),
+                'data'    => $this->formatProfileData($profile, $profile->user, $isOwner),
             ], 200);
 
         } catch (\Exception $e) {
             Log::error("Profile fetch error: {$e->getMessage()}");
             return response()->json([
                 'success' => false,
-                'message' => 'Failed to retrieve profile',
-            ], 500);
+                'message' => 'Profile not found',
+            ], 404);
         }
     }
 

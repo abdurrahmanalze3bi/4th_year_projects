@@ -173,6 +173,208 @@ class RideController extends Controller
     }
 
     /**
+     * Get multiple route options between two points
+     */
+    public function getRouteOptions(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'pickup_lat' => 'required|numeric',
+            'pickup_lng' => 'required|numeric',
+            'destination_lat' => 'required|numeric',
+            'destination_lng' => 'required|numeric',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $origin = [
+                'lat' => $request->pickup_lat,
+                'lng' => $request->pickup_lng
+            ];
+
+            $destination = [
+                'lat' => $request->destination_lat,
+                'lng' => $request->destination_lng
+            ];
+
+            $routes = $this->geo->getRouteAlternatives(
+                $origin,
+                $destination,
+                3 // Get up to 3 alternatives
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'origin' => $origin,
+                    'destination' => $destination,
+                    'routes' => $routes,
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Route options failed', [
+                'error' => $e->getMessage(),
+                'request' => $request->all()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to get route options: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Create a ride with a pre-selected route
+     */
+    /**
+     * Create a ride with a pre-selected route (supports addresses or coordinates)
+     */
+    public function createRideWithRoute(Request $request)
+    {
+        $user = $request->user();
+
+        if (!$user->is_verified_driver) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You must be verified as a driver to create rides.'
+            ], 403);
+        }
+
+        $this->validateDriverProfile($user);
+
+        $validator = Validator::make($request->all(), [
+            'pickup_address'       => 'required_without_all:pickup_lat,pickup_lng|string|max:255',
+            'pickup_lat'           => 'required_with:pickup_lng|numeric',
+            'pickup_lng'           => 'required_with:pickup_lat|numeric',
+            'destination_address'  => 'required_without_all:destination_lat,destination_lng|string|max:255',
+            'destination_lat'      => 'required_with:destination_lng|numeric',
+            'destination_lng'      => 'required_with:destination_lat|numeric',
+            'route_index'          => 'required|integer|min:0',
+            'departure_time'       => 'required|date|after:now',
+            'available_seats'      => 'required|integer|min:1',
+            'price_per_seat'       => 'required|numeric|min:0',
+            'notes'                => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            // ====== PICKUP HANDLING ======
+            if ($request->filled('pickup_address')) {
+                // Geocode address to coordinates
+                $pickup = $this->geo->geocodeAddress($request->pickup_address);
+                $pickupAddress = $request->pickup_address;
+            } else {
+                // Use provided coordinates and reverse geocode for address
+                $pickup = [
+                    'lat' => (float)$request->pickup_lat,
+                    'lng' => (float)$request->pickup_lng,
+                ];
+                $pickupAddress = $this->geo->reverseGeocode($pickup['lat'], $pickup['lng']);
+            }
+
+            // ====== DESTINATION HANDLING ======
+            if ($request->filled('destination_address')) {
+                // Geocode address to coordinates
+                $destination = $this->geo->geocodeAddress($request->destination_address);
+                $destinationAddress = $request->destination_address;
+            } else {
+                // Use provided coordinates and reverse geocode for address
+                $destination = [
+                    'lat' => (float)$request->destination_lat,
+                    'lng' => (float)$request->destination_lng,
+                ];
+                $destinationAddress = $this->geo->reverseGeocode($destination['lat'], $destination['lng']);
+            }
+
+            // ====== GET ROUTE ALTERNATIVES ======
+            $routeOptions = $this->geo->getRouteAlternatives(
+                $pickup,
+                $destination,
+                3 // Get up to 3 alternatives
+            );
+
+            // Validate route index
+            if ($request->route_index >= count($routeOptions)) {
+                throw new \Exception('Invalid route selection. Maximum index is ' . (count($routeOptions) - 1));
+            }
+
+            $chosenRoute = $routeOptions[$request->route_index];
+
+            // ====== PREPARE RIDE DATA ======
+            $data = [
+                'driver_id' => $user->id,
+                'pickup_address' => $pickupAddress,
+                'destination_address' => $destinationAddress,
+                'pickup_location' => [
+                    'lat' => $pickup['lat'],
+                    'lng' => $pickup['lng'],
+                ],
+                'destination_location' => [
+                    'lat' => $destination['lat'],
+                    'lng' => $destination['lng'],
+                ],
+                'distance' => $chosenRoute['distance'],
+                'duration' => $chosenRoute['duration'],
+                'route_geometry' => $chosenRoute['geometry'],
+                'chosen_route_index' => $request->route_index,
+                'departure_time' => $request->departure_time,
+                'available_seats' => $request->available_seats,
+                'price_per_seat' => $request->price_per_seat,
+                'vehicle_type' => $user->profile->type_of_car,
+                'notes' => $request->notes,
+            ];
+
+            // ====== CREATE RIDE ======
+            $ride = $this->rideRepository->createRideWithGeometry($data);
+
+            // Update driver stats
+            $user->profile->increment('number_of_rides');
+
+            // ====== NOTIFICATIONS & EVENTS ======
+            $this->notifyNearbyPassengers($ride, $pickup, $destination);
+            broadcast(new RideCreated($ride));
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'data' => $this->formatRideResponse($ride),
+                'message' => 'Ride created successfully'
+            ], 201);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            Log::error('Ride creation with route failed', [
+                'driver_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Ride creation failed: ' . $e->getMessage(),
+            ], 400);
+        }
+    }
+
+    /**
      * Book a ride (passengers only)
      */
     public function bookRide(Request $request, int $rideId)
@@ -690,6 +892,8 @@ class RideController extends Controller
             'vehicle_type' => $ride->vehicle_type,
             'notes' => $ride->notes,
             'created_at' => $ride->created_at->toIso8601String(),
+            'chosen_route_index' => $ride->chosen_route_index, // NEW: Return index
+            'route_geometry' => $ride->route_geometry,
         ];
     }
 

@@ -396,4 +396,39 @@ class RideRepository implements RideRepositoryInterface
             return $ride->fresh();
         });
     }
+    /**
+     * Create a ride with pre-calculated geometry
+     */
+    public function createRideWithGeometry(array $data): Ride
+    {
+        return DB::transaction(function () use ($data) {
+            $ride = new Ride();
+
+            $ride->driver_id = $data['driver_id'];
+            $ride->pickup_address = $data['pickup_address'];
+            $ride->destination_address = $data['destination_address'];
+            $ride->distance = $data['distance'];
+            $ride->duration = $data['duration'];
+            $ride->route_geometry = $data['route_geometry'];
+            $ride->chosen_route_index = $data['chosen_route_index']; // NEW: Save index
+            $ride->departure_time = Carbon::parse($data['departure_time']);
+            $ride->available_seats = $data['available_seats'];
+            $ride->price_per_seat = $data['price_per_seat'];
+            $ride->vehicle_type = $data['vehicle_type'];
+            $ride->notes = $data['notes'] ?? null;
+
+            $ride->pickup_location = [
+                'lat' => $data['pickup_location']['lat'],
+                'lng' => $data['pickup_location']['lng'],
+            ];
+
+            $ride->destination_location = [
+                'lat' => $data['destination_location']['lat'],
+                'lng' => $data['destination_location']['lng'],
+            ];
+
+            $ride->save();
+            return $ride->fresh();
+        });
+    }
 }
