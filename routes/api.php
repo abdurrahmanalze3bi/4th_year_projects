@@ -4,6 +4,7 @@ use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
 use App\Http\Controllers\API\NotificationController;
+use App\Http\Controllers\API\OtpController;
 use App\Http\Controllers\API\RideController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\SignupController;
@@ -50,17 +51,20 @@ Route::get('test-db', function() {
     }
 });
 
-// Public routes
-Route::post('/signup', [SignupController::class, 'register']);
-Route::post('/login', [LoginController::class, '__invoke']);
-Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
-Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
-
 // Test route for basic API functionality
 Route::get('/test', function() {
     return response()->json(['message' => 'API is working!', 'timestamp' => now()]);
 });
 
+// OTP routes (public)
+Route::post('/otp/send', [OtpController::class, 'sendOtp']);
+Route::post('/otp/verify', [OtpController::class, 'verifyOtp']);
+
+// Authentication routes (public)
+Route::post('/signup', [SignupController::class, 'register']);
+Route::post('/login', [LoginController::class, '__invoke']);
+Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
+Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
 // Authenticated routes
 Route::middleware('auth:sanctum')->group(function () {
     // User info
@@ -87,8 +91,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{rideId}/book', [RideController::class, 'bookRide']);
         Route::patch('/{ride}/cancel', [RideController::class, 'cancelRide']);
         Route::post('/search', [RideController::class, 'searchRides']);
-
-        // Add these CORRECTLY inside the prefix group
         Route::post('/route-options', [RideController::class, 'getRouteOptions']);
         Route::post('/create-with-route', [RideController::class, 'createRideWithRoute']);
     });

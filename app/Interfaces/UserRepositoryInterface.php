@@ -10,4 +10,5 @@ interface UserRepositoryInterface {
     public function findByEmail($email);
     public function findByGoogleId($googleId); // Add this
     public function updateGoogleId($userId, $googleId); // Add this
+
 }

@@ -22,19 +22,23 @@ class User extends Authenticatable
      */
     // app/Models/User.php
     protected $fillable = [
-
         'first_name',
         'last_name',
         'email',
         'password',
-        'gender',       // Keep existing
-        'address',      // Keep existing
-        'google_id',    // Added
-        'avatar',       ///* Added
-        'status'  ,
+        'gender',
+        'address',
+        'google_id',
+        'avatar',
+        'status',
         'is_verified_passenger',
         'is_verified_driver',
         'verification_status'
+    ];
+
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'password' => 'hashed'
     ];
 
     protected $hidden = [
@@ -53,10 +57,7 @@ class User extends Authenticatable
      *
      * @var array<string, string>
      */
-    protected $casts = [
-        'email_verified_at' => 'datetime',
-        'password' => 'hashed',
-    ];
+
     // app/Models/User.php
     public function sendPasswordResetNotification($token)
     {

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\API;
 use App\Http\Controllers\Controller;
 use App\Interfaces\UserRepositoryInterface;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 
 class SignupController extends Controller
 {
@@ -30,7 +31,16 @@ class SignupController extends Controller
         ]);
 
         try {
-            $user = $this->userRepository->createUser($validatedData);
+            $user = $this->userRepository->createUser([
+                'first_name' => $validatedData['first_name'],
+                'last_name' => $validatedData['last_name'],
+                'email' => $validatedData['email'],
+                'password' => Hash::make($validatedData['password']),
+                'gender' => $validatedData['gender'],
+                'address' => $validatedData['address'],
+                'status' => 1
+            ]);
+
             $token = $user->createToken('auth-token')->plainTextToken;
 
             return response()->json([

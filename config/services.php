@@ -13,6 +13,7 @@ return [
     | a conventional file to locate the various service credentials.
     |
     */
+
     'openroute' => [
         'api_key' => env('OPENROUTE_API_KEY'),
         'cache_ttl' => env('OPENROUTE_CACHE_TTL', 86400),
@@ -45,4 +46,9 @@ return [
         'server_key' => env('FCM_SERVER_KEY'),
         'sender_id' => env('FCM_SENDER_ID'),
     ],
+    'chatdaddy' => [
+        'api_key' => env('CHATDADDY_API_KEY'),
+        'base_url' => env('CHATDADDY_BASE_URL', 'https://api.chatdaddy.tech'),
+    ],
+
 ];
