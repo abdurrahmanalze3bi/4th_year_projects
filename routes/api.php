@@ -1,11 +1,13 @@
 <?php
 
+use App\Http\Controllers\API\AdminDashboardController;
 use App\Http\Controllers\API\Auth\GoogleController;
 use App\Http\Controllers\API\ChatController;
 use App\Http\Controllers\API\DocumentController;
 use App\Http\Controllers\API\NotificationController;
 use App\Http\Controllers\API\OtpController;
 use App\Http\Controllers\API\RideController;
+use App\Http\Controllers\API\TextMeOtpController;
 use App\Http\Controllers\API\VerificationController;
 use App\Http\Controllers\API\SignupController;
 use App\Http\Controllers\API\LoginController;
@@ -13,6 +15,7 @@ use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\ForgotPasswordController;
 use App\Http\Controllers\API\ResetPasswordController;
 use App\Http\Controllers\API\ProfileController;
+use App\Http\Controllers\API\WalletController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -59,7 +62,10 @@ Route::get('/test', function() {
 // OTP routes (public)
 Route::post('/otp/send', [OtpController::class, 'sendOtp']);
 Route::post('/otp/verify', [OtpController::class, 'verifyOtp']);
-
+Route::prefix('textme-otp')->group(function () {
+    Route::post('/send', [TextMeOtpController::class, 'sendOtp']);
+    Route::post('/verify', [TextMeOtpController::class, 'verifyOtp']);
+});
 // Authentication routes (public)
 Route::post('/signup', [SignupController::class, 'register']);
 Route::post('/login', [LoginController::class, '__invoke']);
@@ -116,5 +122,27 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/{id}', [NotificationController::class, 'destroy']);
         Route::get('/categories', [NotificationController::class, 'getCategories']);
         Route::post('/bulk-action', [NotificationController::class, 'bulkAction']);
+    });
+
+
+
+        // Wallet routes
+    Route::prefix('wallet')->group(function () {
+        Route::post('/initiate', [WalletController::class, 'initiateWalletCreation']);
+        Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
+        Route::get('/balance', [WalletController::class, 'getBalance']);
+    });
+
+
+
+    Route::prefix('admin')->group(function () {
+        // Admin login
+        Route::post('/login', [AdminDashboardController::class, 'login']);
+
+        // Admin dashboard routes (protected)
+        Route::get('/dashboard/stats', [AdminDashboardController::class, 'getDashboardStats']);
+        Route::get('/wallets', [AdminDashboardController::class, 'getAllWallets']);
+        Route::get('/wallet/{wallet_id}/transactions', [AdminDashboardController::class, 'getWalletTransactions']);
+        Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
     });
 });

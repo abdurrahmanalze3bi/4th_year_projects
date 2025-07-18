@@ -1,7 +1,6 @@
 <?php
 
 namespace App\Services;
-
 use App\Interfaces\OtpRepositoryInterface;
 use App\Models\Otp;
 use Carbon\Carbon;
@@ -9,23 +8,22 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
 use Illuminate\Support\Facades\Log;
 
-class WhatsAppOtpService
+class TextMeBotOtpService
 {
     protected $otpRepository;
-    protected $client;
     protected $apiKey;
 
     public function __construct(OtpRepositoryInterface $otpRepository)
     {
         $this->otpRepository = $otpRepository;
-        $this->client = new Client();
-        $this->apiKey = env('CALLMEBOT_API_KEY');
+        $this->apiKey = env('TEXTMEBOT_API_KEY');
     }
 
     /**
-     * Send OTP via WhatsApp
+     * Send OTP via WhatsApp using TextMeBot
      */
     public function sendOtp(string $phoneNumber, string $type = 'E-PAYMENT'): array
+
     {
         try {
             // Validate Syrian phone number
@@ -57,37 +55,36 @@ class WhatsAppOtpService
 
             // Always try to send if API key exists
             if (!empty($this->apiKey)) {
-                $sent = $this->sendViaCallMeBot($validatedPhone, $otpCode);
+                $sent = $this->sendViaTextMeBot($validatedPhone, $otpCode);
 
                 if (!$sent) {
-                    Log::error("Failed to send OTP to $validatedPhone");
+                    Log::error("TextMeBot: Failed to send OTP to $validatedPhone");
                     return [
                         'success' => false,
                         'message' => 'Failed to send OTP. Please try again.',
-                        'otp_code' => $otpCode, // Return OTP for debugging
+                        'otp_code' => $otpCode,
                         'expires_at' => $otp->expires_at->toDateTimeString()
                     ];
                 }
 
-                Log::info("OTP sent to $validatedPhone");
+                Log::info("TextMeBot: OTP sent to $validatedPhone");
                 return [
                     'success' => true,
-                    'message' => 'OTP sent successfully via WhatsApp',
+                    'message' => 'OTP sent successfully via WhatsApp (TextMeBot)',
                     'expires_at' => $otp->expires_at->toDateTimeString()
                 ];
             }
 
-            // No API key - return OTP directly
-            Log::info("OTP generated for $validatedPhone: $otpCode (no API key)");
+            Log::info("TextMeBot: OTP generated for $validatedPhone: $otpCode (no API key)");
             return [
                 'success' => true,
-                'message' => 'OTP generated (no API key configured)',
+                'message' => 'OTP generated (TextMeBot not configured)',
                 'otp_code' => $otpCode,
                 'expires_at' => $otp->expires_at->toDateTimeString()
             ];
 
         } catch (\Exception $e) {
-            Log::error('OTP send error: ' . $e->getMessage());
+            Log::error('TextMeBot OTP send error: ' . $e->getMessage());
             return [
                 'success' => false,
                 'message' => 'Failed to send OTP. Please try again.'
@@ -96,7 +93,7 @@ class WhatsAppOtpService
     }
 
     /**
-     * Verify OTP
+     * Verify OTP (same as WhatsAppOtpService)
      */
     public function verifyOtp(string $phoneNumber, string $code): array
     {
@@ -141,58 +138,59 @@ class WhatsAppOtpService
     }
 
     /**
-     * Send OTP via CallMeBot API (works with personal WhatsApp)
+     * Send OTP via TextMeBot API
      */
-    private function sendViaCallMeBot(string $phoneNumber, string $otpCode): bool
+    private function sendViaTextMeBot(string $phoneNumber, string $otpCode): bool
     {
+        // Add 5-second delay to prevent WhatsApp blocking
+        sleep(5);
+
         try {
-            $normalizedPhone = $this->normalizeForCallMeBot($phoneNumber);
+            $normalizedPhone = $this->normalizeForTextMeBot($phoneNumber);
             $message = "Your verification code is: $otpCode\n\nThis code will expire in 5 minutes.\n\nDo not share this code with anyone.";
 
-            $url = "https://api.callmebot.com/whatsapp.php?" . http_build_query([
-                    'phone' => $normalizedPhone,
+            $url = "http://api.textmebot.com/send.php?" . http_build_query([
+                    'recipient' => $normalizedPhone,
+                    'apikey' => $this->apiKey,
                     'text' => $message,
-                    'apikey' => $this->apiKey
+                    'json' => 'yes' // Request JSON response
                 ]);
 
-            // Create client with disabled SSL verification
-            $insecureClient = new Client(['verify' => false]);
+            $client = new Client();
+            $response = $client->get($url);
+            $responseData = json_decode($response->getBody()->getContents(), true);
 
-            $response = $insecureClient->get($url);
-            $statusCode = $response->getStatusCode();
-            $responseBody = $response->getBody()->getContents();
-
-            // Consider 200 or 203 as success regardless of response body
-            if ($statusCode === 200 || $statusCode === 203) {
-                Log::info("OTP sent successfully to $phoneNumber. Response status: $statusCode");
+            if (isset($responseData['status']) && $responseData['status'] === 'success') {
+                Log::info("TextMeBot: OTP sent successfully to $phoneNumber");
                 return true;
             }
 
-            Log::error("CallMeBot failed. Status: $statusCode | Response: $responseBody");
+            Log::error("TextMeBot failed. Response: " . json_encode($responseData));
             return false;
 
         } catch (RequestException $e) {
-            Log::error('CallMeBot API error: ' . $e->getMessage());
+            Log::error('TextMeBot API error: ' . $e->getMessage());
             return false;
         }
     }
+
     /**
-     * Normalize phone for CallMeBot (963XXXXXXXXX format)
+     * Normalize phone for TextMeBot (+963 format)
      */
-    private function normalizeForCallMeBot(string $phoneNumber): string
+    private function normalizeForTextMeBot(string $phoneNumber): string
     {
         $clean = preg_replace('/[^0-9]/', '', $phoneNumber);
         $clean = ltrim($clean, '0');
 
         if (str_starts_with($clean, '9639') && strlen($clean) === 12) {
-            return $clean; // Already in 9639XXXXXXXX format
+            return '+' . $clean; // +9639XXXXXXXX
         }
 
         if (str_starts_with($clean, '9') && strlen($clean) === 9) {
-            return '963' . $clean; // 9XXXXXXXX → 9639XXXXXXXX
+            return '+963' . $clean; // +9639XXXXXXXX
         }
 
-        return $clean;
+        return '+' . $clean;
     }
 
     /**
@@ -203,13 +201,12 @@ class WhatsAppOtpService
         $phone = preg_replace('/[^0-9]/', '', $phoneNumber);
         $phone = ltrim($phone, '0');
 
-        // Handle all valid formats
         if (strlen($phone) === 9 && $phone[0] === '9') {
-            return '+963' . $phone; // +963983337214
+            return '+963' . $phone;
         } elseif (strlen($phone) === 12 && substr($phone, 0, 3) === '963' && $phone[3] === '9') {
-            return '+' . $phone;    // +963983337214
+            return '+' . $phone;
         } elseif (strlen($phone) === 10 && substr($phone, 0, 2) === '09') {
-            return '+963' . substr($phone, 1); // 0983337214 → +963983337214
+            return '+963' . substr($phone, 1);
         }
 
         throw new \InvalidArgumentException('Invalid Syrian phone number format');
@@ -221,6 +218,6 @@ class WhatsAppOtpService
     private function canSendOtp(string $phoneNumber): bool
     {
         $recentAttempts = $this->otpRepository->getRecentAttempts($phoneNumber, 5);
-        return $recentAttempts < 3; // Max 3 attempts per 5 minutes
+        return $recentAttempts < 3;
     }
 }

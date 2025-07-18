@@ -33,7 +33,8 @@ class User extends Authenticatable
         'status',
         'is_verified_passenger',
         'is_verified_driver',
-        'verification_status'
+        'verification_status',
+        'wallet_id'
     ];
 
     protected $casts = [
@@ -159,4 +160,11 @@ class User extends Authenticatable
     {
         return $this->receivedRatings()->count();
     }
+    // app/Models/User.php
+    public function wallet()
+    {
+        return $this->hasOne(Wallet::class);
+    }
+
+
 }

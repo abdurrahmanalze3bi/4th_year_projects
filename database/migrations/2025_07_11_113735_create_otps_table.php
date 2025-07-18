@@ -15,7 +15,7 @@ return new class extends Migration
             $table->id();
             $table->string('phone_number', 20);
             $table->string('otp_code', 6);
-            $table->enum('type', ['registration', 'login', 'password_reset'])->default('registration');
+            $table->enum('type', ['registration', 'login', 'password_reset','E-PAYMENT','WALLET_CREATION'])->default('E-PAYMENT');
             $table->timestamp('expires_at');
             $table->boolean('is_verified')->default(false);
             $table->timestamp('verified_at')->nullable();

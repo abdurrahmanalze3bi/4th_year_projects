@@ -5,24 +5,31 @@ namespace App\Http\Controllers\API;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\SendOtpRequest;
 use App\Http\Requests\VerifyOtpRequest;
-use App\Services\WhatsAppOtpService;
+use App\Services\TextMeBotOtpService;
 use Illuminate\Http\JsonResponse;
 
-class OtpController extends Controller
+class TextMeOtpController extends Controller
 {
     protected $otpService;
 
-    public function __construct(WhatsAppOtpService $otpService)
+    public function __construct(TextMeBotOtpService $otpService)
     {
         $this->otpService = $otpService;
     }
 
     /**
-     * Send OTP to phone number
-     * POST /api/otp/send
+     * Send OTP via TextMeBot
+     * POST /api/textme-otp/send
      */
     public function sendOtp(SendOtpRequest $request): JsonResponse
     {
+        if (!env('TEXTMEBOT_ENABLED', false)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'TextMeBot service is currently disabled'
+            ], 400);
+        }
+
         $result = $this->otpService->sendOtp(
             $request->phone_number,
             $request->type ?? 'E-PAYMENT'
@@ -33,7 +40,7 @@ class OtpController extends Controller
 
     /**
      * Verify OTP
-     * POST /api/otp/verify
+     * POST /api/textme-otp/verify
      */
     public function verifyOtp(VerifyOtpRequest $request): JsonResponse
     {

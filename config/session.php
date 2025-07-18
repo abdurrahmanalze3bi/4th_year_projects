@@ -143,7 +143,10 @@ return [
     */
 
     'path' => '/',
-
+    'domain' => env('SESSION_DOMAIN', 'localhost'),
+    'secure' => env('SESSION_SECURE_COOKIE', false),
+    'http_only' => true,
+    'same_site' => 'lax',
     /*
     |--------------------------------------------------------------------------
     | Session Cookie Domain
@@ -155,7 +158,6 @@ return [
     |
     */
 
-    'domain' => env('SESSION_DOMAIN'),
 
     /*
     |--------------------------------------------------------------------------
@@ -168,7 +170,6 @@ return [
     |
     */
 
-    'secure' => env('SESSION_SECURE_COOKIE'),
 
     /*
     |--------------------------------------------------------------------------
@@ -180,8 +181,6 @@ return [
     | the HTTP protocol. You are free to modify this option if needed.
     |
     */
-
-    'http_only' => true,
 
     /*
     |--------------------------------------------------------------------------
@@ -195,8 +194,6 @@ return [
     | Supported: "lax", "strict", "none", null
     |
     */
-
-    'same_site' => 'lax',
 
     /*
     |--------------------------------------------------------------------------

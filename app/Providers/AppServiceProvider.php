@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Interfaces\ChatRepositoryInterface;
+use App\Interfaces\OtpRepositoryInterface;
 use App\Interfaces\PasswordResetRepositoryInterface;
 use App\Interfaces\ProfileRepositoryInterface;
 use App\Interfaces\UserRepositoryInterface;
@@ -12,6 +13,7 @@ use App\Repositories\ChatRepository;
 use App\Repositories\PasswordResetRepository;
 use App\Repositories\ProfileRepository;
 use App\Repositories\UserRepository;
+use App\Services\TextMeBotOtpService;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 
@@ -50,6 +52,9 @@ class AppServiceProvider extends ServiceProvider
             UserRepositoryInterface::class,
             UserRepository::class
         );
+        $this->app->bind(TextMeBotOtpService::class, function ($app) {
+            return new TextMeBotOtpService($app->make(OtpRepositoryInterface::class));
+        });
 
         $this->app->bind(
             PasswordResetRepositoryInterface::class,
