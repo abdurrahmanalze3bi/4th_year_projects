@@ -285,7 +285,8 @@ class RideRepository implements RideRepositoryInterface
         Log::info('RideRepository: Booking ride', [
             'ride_id' => $rideId,
             'user_id' => $bookingData['user_id'] ?? null,
-            'seats' => $bookingData['seats']
+            'seats' => $bookingData['seats'],
+            'status' => 'confirmed'
         ]);
 
         return DB::transaction(function () use ($rideId, $bookingData) {
@@ -300,6 +301,7 @@ class RideRepository implements RideRepositoryInterface
                 'user_id' => $bookingData['user_id'],
                 'ride_id' => $rideId,
                 'seats' => $bookingData['seats'],
+                'status' => 'confirmed'
             ]);
 
             $ride->decrement('available_seats', $bookingData['seats']);
@@ -384,7 +386,6 @@ class RideRepository implements RideRepositoryInterface
         return DB::transaction(function () use ($rideId, $driverId) {
             $ride = Ride::where('driver_id', $driverId)
                 ->findOrFail($rideId);
-
             if ($ride->status === 'cancelled') {
                 throw new \Exception('Ride is already cancelled');
             }

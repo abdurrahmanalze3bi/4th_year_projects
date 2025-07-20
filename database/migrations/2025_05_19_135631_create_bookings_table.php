@@ -18,7 +18,7 @@ return new class extends Migration
             $table->foreignId('ride_id')->constrained();
             $table->foreignId('user_id')->constrained();
             $table->unsignedInteger('seats');
-            $table->string('status')->default('pending');
+            $table->string('status');
             $table->timestamps();
         });
     }

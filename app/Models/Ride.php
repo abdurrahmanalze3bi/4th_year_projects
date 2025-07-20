@@ -31,6 +31,7 @@ class Ride extends Model
         'price_per_seat',
         'vehicle_type',
         'notes',
+        'finished_at' => 'datetime',
         // We will write to pickup_location and destination_location via the setter
     ];
 
@@ -42,7 +43,8 @@ class Ride extends Model
         'pickup_location' => 'array',
         'destination_location' => 'array',
         'route_geometry' => 'array',
-        'status' => 'string'
+        'status' => 'string',
+          'driver_confirmed_at' => 'datetime'
     ];
 
     //------------------------------------------------------------------------//

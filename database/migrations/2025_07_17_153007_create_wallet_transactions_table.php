@@ -15,7 +15,7 @@ return new class extends Migration
             $table->id();
             $table->unsignedBigInteger('wallet_id');
             $table->unsignedBigInteger('user_id');
-            $table->enum('type', ['credit', 'debit','admin_credit']);
+            $table->enum('type', ['credit', 'debit','admin_credit','ride_creation_fee']);
             $table->decimal('amount', 15, 2);
             $table->decimal('previous_balance', 15, 2);
             $table->decimal('new_balance', 15, 2);
