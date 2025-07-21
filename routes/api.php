@@ -138,14 +138,5 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
 
-    Route::prefix('admin')->group(function () {
-        // Admin login
-        Route::post('/login', [AdminDashboardController::class, 'login']);
 
-        // Admin dashboard routes (protected)
-        Route::get('/dashboard/stats', [AdminDashboardController::class, 'getDashboardStats']);
-        Route::get('/wallets', [AdminDashboardController::class, 'getAllWallets']);
-        Route::get('/wallet/{wallet_id}/transactions', [AdminDashboardController::class, 'getWalletTransactions']);
-        Route::post('/wallet/charge', [AdminDashboardController::class, 'chargeWallet']);
-    });
 });
