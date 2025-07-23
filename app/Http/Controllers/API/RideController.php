@@ -63,6 +63,7 @@ class RideController extends Controller
             'departure_time'       => 'required|date|after:now',
             'available_seats'      => 'required|integer|min:1',
             'price_per_seat'       => 'required|numeric|min:0',
+            'booking_type' => 'required|in:direct,request',
             'payment_method'       => 'required|in:cash,e-pay', // Added payment method validation
             'notes'                => 'nullable|string|max:500',
         ]);
@@ -195,6 +196,7 @@ class RideController extends Controller
                 'available_seats'     => $request->input('available_seats'),
                 'price_per_seat'      => $request->input('price_per_seat'),
                 'vehicle_type'        => $user->profile->type_of_car,
+                'booking_type' => $request->input('booking_type'),
                 'payment_method'      => $request->input('payment_method'), // Added payment method
                 'notes'               => $request->input('notes'),
             ];
@@ -345,7 +347,10 @@ class RideController extends Controller
             'departure_time'       => 'required|date|after:now',
             'available_seats'      => 'required|integer|min:1',
             'price_per_seat'       => 'required|numeric|min:0',
-            'payment_method'       => 'required|in:cash,e-pay', // Added payment method validation
+            'payment_method'       => 'required|in:cash,e-pay',
+            // In your RideController's validation rules
+            'communication_number' => 'required|regex:/^09\d{8}$/',
+            'booking_type'         => 'required|in:direct,request', // New field
             'notes'                => 'nullable|string|max:500',
         ]);
 
@@ -359,24 +364,21 @@ class RideController extends Controller
         try {
             DB::beginTransaction();
 
-            // Calculate required fee: 5% of (4 * total ride price)
+            // Calculate required fee
             $totalRidePrice = $request->price_per_seat * $request->available_seats;
             $requiredFee = ($totalRidePrice) * 0.05;
 
-            // Get driver's wallet with lock
+            // Get driver's wallet
             $driverWallet = Wallet::where('user_id', $user->id)
                 ->lockForUpdate()
-                ->first();
-
-            if (!$driverWallet) {
-                throw new \Exception('Wallet not found for this driver');
-            }
+                ->firstOrFail();
 
             // Verify sufficient balance
             if ($driverWallet->balance < $requiredFee) {
                 throw new \Exception(
-                    'Insufficient wallet balance. Required fee: ' . number_format($requiredFee, 2) .
-                    '. Current balance: ' . number_format($driverWallet->balance, 2)
+                    'Insufficient wallet balance. Required fee: ' .
+                    number_format($requiredFee, 2) . '. Current balance: ' .
+                    number_format($driverWallet->balance, 2)
                 );
             }
 
@@ -384,11 +386,7 @@ class RideController extends Controller
             $syCashConfig = AdminDashboardController::ADMIN_CONFIGS['sycash'];
             $syCashWallet = Wallet::where('phone_number', $syCashConfig['phone'])
                 ->lockForUpdate()
-                ->first();
-
-            if (!$syCashWallet) {
-                throw new \Exception('SyCash system wallet not found');
-            }
+                ->firstOrFail();
 
             // Transfer funds
             $driverPreviousBalance = $driverWallet->balance;
@@ -401,8 +399,6 @@ class RideController extends Controller
 
             // Record transactions
             $transactionId = 'RIDE_FEE_' . time() . '_' . Str::random(6);
-
-            // Driver transaction
             WalletTransaction::create([
                 'wallet_id' => $driverWallet->id,
                 'user_id' => $user->id,
@@ -415,13 +411,13 @@ class RideController extends Controller
                 'status' => 'completed',
                 'metadata' => [
                     'ride_type' => 'pre_routed',
+                    'booking_type' => $request->booking_type,
                     'total_ride_price' => $totalRidePrice,
                     'calculation' => '5% of (4 x ' . $totalRidePrice . ')',
-                    'payment_method' => $request->payment_method // Track payment method
+                    'payment_method' => $request->payment_method
                 ]
             ]);
 
-            // SyCash transaction
             WalletTransaction::create([
                 'wallet_id' => $syCashWallet->id,
                 'user_id' => $syCashWallet->user_id,
@@ -434,13 +430,14 @@ class RideController extends Controller
                 'status' => 'completed',
                 'metadata' => [
                     'driver_id' => $user->id,
+                    'booking_type' => $request->booking_type,
                     'driver_name' => $user->first_name . ' ' . $user->last_name,
                     'fee_calculation' => '5% of (4 x ' . $totalRidePrice . ')',
-                    'payment_method' => $request->payment_method // Track payment method
+                    'payment_method' => $request->payment_method
                 ]
             ]);
 
-            // Continue with ride creation
+            // Geocode addresses if needed
             if ($request->filled('pickup_address')) {
                 $pickup = $this->geo->geocodeAddress($request->pickup_address);
                 $pickupAddress = $request->pickup_address;
@@ -463,18 +460,15 @@ class RideController extends Controller
                 $destinationAddress = $this->geo->reverseGeocode($destination['lat'], $destination['lng']);
             }
 
-            $routeOptions = $this->geo->getRouteAlternatives(
-                $pickup,
-                $destination,
-                3
-            );
-
+            // Get route options
+            $routeOptions = $this->geo->getRouteAlternatives($pickup, $destination, 3);
             if ($request->route_index >= count($routeOptions)) {
                 throw new \Exception('Invalid route selection. Maximum index is ' . (count($routeOptions) - 1));
             }
 
             $chosenRoute = $routeOptions[$request->route_index];
 
+            // Prepare ride data
             $data = [
                 'driver_id' => $user->id,
                 'pickup_address' => $pickupAddress,
@@ -495,14 +489,17 @@ class RideController extends Controller
                 'available_seats' => $request->available_seats,
                 'price_per_seat' => $request->price_per_seat,
                 'vehicle_type' => $user->profile->type_of_car,
-                'payment_method' => $request->input('payment_method'), // Added payment method
+                'communication_number' => $request->input('communication_number'),
+                'payment_method' => $request->input('payment_method'),
+                'booking_type' => $request->input('booking_type'), // New field
                 'notes' => $request->notes,
             ];
 
+            // Create ride
             $ride = $this->rideRepository->createRideWithGeometry($data);
-
             $user->profile->increment('number_of_rides');
 
+            // Notify nearby passengers
             $this->notifyNearbyPassengers($ride, $pickup, $destination);
             broadcast(new RideCreated($ride));
 
@@ -512,7 +509,8 @@ class RideController extends Controller
                 'ride_id' => $ride->id,
                 'driver_id' => $user->id,
                 'fee_deducted' => $requiredFee,
-                'payment_method' => $request->payment_method // Log payment method
+                'payment_method' => $request->payment_method,
+                'booking_type' => $request->booking_type
             ]);
 
             return response()->json([
@@ -529,6 +527,7 @@ class RideController extends Controller
                 'trace' => $e->getTraceAsString(),
                 'request' => $request->all()
             ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Ride creation failed: ' . $e->getMessage(),
@@ -539,10 +538,10 @@ class RideController extends Controller
     /**
      * Book a ride with payment method handling
      */
+    // RideController.php - bookRide method
     public function bookRide(Request $request, int $rideId)
     {
         $user = $request->user();
-
         if (!$user->is_verified_passenger) {
             return response()->json([
                 'success' => false,
@@ -552,6 +551,7 @@ class RideController extends Controller
 
         $validator = Validator::make($request->all(), [
             'seats' => 'required|integer|min:1|max:10',
+            'communication_number' => 'required|regex:/^09\d{8}$/',
         ]);
 
         if ($validator->fails()) {
@@ -563,8 +563,6 @@ class RideController extends Controller
 
         try {
             DB::beginTransaction();
-
-            // Get ride details first
             $ride = $this->rideRepository->getRideById($rideId);
 
             // Prevent self-booking
@@ -586,68 +584,69 @@ class RideController extends Controller
 
             // Calculate total cost
             $totalCost = $request->input('seats') * $ride->price_per_seat;
+            $seats = $request->input('seats');
 
-            // Handle payment based on ride's payment method
-            if ($ride->payment_method === 'e-pay') {
-                // E-PAY: Process wallet payment
-                $passengerWallet = Wallet::where('user_id', $user->id)->first();
-                if (!$passengerWallet) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Passenger wallet not found. Please contact support.'
-                    ], 400);
+            // Determine booking status based on ride type
+            $bookingStatus = ($ride->booking_type === 'direct')
+                ? Booking::CONFIRMED
+                : Booking::PENDING;
+
+            $booking = $this->rideRepository->bookRide($rideId, [
+                'user_id' => $user->id,
+                'seats' => $seats,
+                'status' => $bookingStatus,
+                'communication_number' => $request->input('communication_number'),
+            ]);
+
+            // Handle payment for direct bookings
+            if ($ride->booking_type === 'direct') {
+                if ($ride->payment_method === 'e-pay') {
+                    $passengerWallet = Wallet::where('user_id', $user->id)->firstOrFail();
+                    $adminWallet = Wallet::whereHas('user', function($query) {
+                        $query->where('email', 'twisrmann2002@gmail.com');
+                    })->firstOrFail();
+
+                    $this->processWalletTransfer(
+                        $passengerWallet,
+                        $adminWallet,
+                        $totalCost,
+                        $booking,
+                        $ride
+                    );
+                    $paymentMessage = "Payment of $" . number_format($totalCost, 2) . " has been processed.";
+                } else {
+                    $paymentMessage = "You'll pay the driver $" . number_format($totalCost, 2) . " in cash.";
                 }
 
-                if ($passengerWallet->balance < $totalCost) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Insufficient wallet balance. Required: $' . number_format($totalCost, 2) . ', Available: $' . number_format($passengerWallet->balance, 2)
-                    ], 400);
-                }
-
-                $adminWallet = Wallet::whereHas('user', function($query) {
-                    $query->where('email', 'twisrmann2002@gmail.com');
-                })->first();
-
-                if (!$adminWallet) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Admin wallet not found. Please contact support.'
-                    ], 500);
-                }
-
-                $booking = $this->rideRepository->bookRide($rideId, [
-                    'user_id' => $user->id,
-                    'seats' => $request->input('seats'),
-                ]);
-
-                $this->processWalletTransfer($passengerWallet, $adminWallet, $totalCost, $booking, $ride);
-
-                $paymentMessage = "Payment of $" . number_format($totalCost, 2) . " has been deducted from your wallet.";
+                $notificationType = 'ride_booked';
+                $passengerTitle = 'Booking Confirmed';
+                $passengerMessage = "Your booking is confirmed! " . $paymentMessage;
+                $driverTitle = 'New Ride Booking';
+                $driverMessage = "{$user->first_name} {$user->last_name} has booked {$seats} seat(s) for your ride";
             } else {
-                // CASH: Create booking without payment processing
-                $booking = $this->rideRepository->bookRide($rideId, [
-                    'user_id' => $user->id,
-                    'seats' => $request->input('seats'),
-                ]);
-
-                $paymentMessage = "You'll pay the driver $" . number_format($totalCost, 2) . " in cash.";
+                $paymentMessage = "Your request has been sent to the driver";
+                $notificationType = 'booking_requested';
+                $passengerTitle = 'Request Sent';
+                $passengerMessage = "Booking request sent. Waiting for driver approval";
+                $driverTitle = 'New Booking Request';
+                $driverMessage = "{$user->first_name} {$user->last_name} has requested {$seats} seat(s) for your ride";
             }
 
-            // Send notification to driver
-            $driverNotification = $this->notificationService->createNotification(
+            // Notify driver
+            $this->notificationService->createNotification(
                 $ride->driver,
-                'ride_booked',
-                'New Ride Booking',
-                "{$user->first_name} {$user->last_name} has booked {$booking->seats} seat(s) for your ride from {$ride->pickup_address} to {$ride->destination_address}. Payment method: " . strtoupper($ride->payment_method),
+                $notificationType,
+                $driverTitle,
+                $driverMessage . " from {$ride->pickup_address} to {$ride->destination_address}.",
                 [
                     'ride_id' => $ride->id,
                     'booking_id' => $booking->id,
                     'passenger_id' => $user->id,
                     'passenger_name' => "{$user->first_name} {$user->last_name}",
-                    'seats_booked' => $booking->seats,
+                    'seats_booked' => $seats,
                     'total_price' => $totalCost,
                     'payment_method' => $ride->payment_method,
+                    'booking_type' => $ride->booking_type,
                     'pickup_address' => $ride->pickup_address,
                     'destination_address' => $ride->destination_address,
                     'departure_time' => $ride->departure_time->toISOString(),
@@ -656,18 +655,18 @@ class RideController extends Controller
                 'ride'
             );
 
-            // Send confirmation notification to passenger
-            $passengerNotification = $this->notificationService->createNotification(
+            // Notify passenger
+            $this->notificationService->createNotification(
                 $user,
-                'booking_confirmed',
-                'Booking Confirmed',
-                "Your booking for {$booking->seats} seat(s) on the ride from {$ride->pickup_address} to {$ride->destination_address} is confirmed. {$paymentMessage}",
+                ($ride->booking_type === 'direct') ? 'booking_confirmed' : 'booking_requested',
+                $passengerTitle,
+                $passengerMessage,
                 [
                     'ride_id' => $ride->id,
                     'booking_id' => $booking->id,
                     'driver_id' => $ride->driver_id,
                     'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
-                    'seats_booked' => $booking->seats,
+                    'seats_booked' => $seats,
                     'total_price' => $totalCost,
                     'payment_method' => $ride->payment_method,
                     'pickup_address' => $ride->pickup_address,
@@ -678,39 +677,41 @@ class RideController extends Controller
                 'ride'
             );
 
-            // Broadcast ride booked event
             broadcast(new RideBooked($ride, $booking, $user));
 
-            // Notify other interested passengers if ride is now full
+            // Check if ride is full
             $remainingSeats = $ride->available_seats - $ride->bookings()->sum('seats');
             if ($remainingSeats <= 0) {
                 $this->notifyRideFull($ride);
+
+                // Update ride status to 'full'
+                $ride->status = 'full';
+                $ride->save();
             }
 
             DB::commit();
 
-            Log::info('Ride booked successfully', [
+            Log::info('Ride booking successful', [
                 'ride_id' => $ride->id,
                 'booking_id' => $booking->id,
                 'passenger_id' => $user->id,
-                'driver_id' => $ride->driver_id,
-                'seats' => $booking->seats,
+                'booking_type' => $ride->booking_type,
+                'status' => $bookingStatus,
                 'total_cost' => $totalCost,
                 'payment_method' => $ride->payment_method,
-                'passenger_wallet_balance' => isset($passengerWallet) ? $passengerWallet->fresh()->balance : null,
-                'admin_wallet_balance' => isset($adminWallet) ? $adminWallet->fresh()->balance : null
+                'new_ride_status' => $ride->status // Log new status
             ]);
 
             return response()->json([
                 'success' => true,
                 'data' => $this->formatBookingResponse($booking),
-                'message' => 'Ride booked successfully! ' . $paymentMessage,
-                'payment_info' => isset($passengerWallet) ? [
-                    'amount_paid' => $totalCost,
-                    'remaining_balance' => $passengerWallet->fresh()->balance
-                ] : null
+                'message' => ($ride->booking_type === 'direct')
+                    ? 'Ride booked successfully! ' . $paymentMessage
+                    : 'Booking request sent successfully!',
+                'payment_info' => ($ride->booking_type === 'direct' && $ride->payment_method === 'e-pay')
+                    ? ['amount_paid' => $totalCost, 'remaining_balance' => $passengerWallet->fresh()->balance]
+                    : null
             ], 201);
-
         } catch (Exception $e) {
             DB::rollBack();
             Log::error('Ride booking failed', [
@@ -719,7 +720,6 @@ class RideController extends Controller
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString()
             ]);
-
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
@@ -812,105 +812,53 @@ class RideController extends Controller
     {
         $user = $request->user();
 
-        try {
-            DB::beginTransaction();
+        return DB::transaction(function () use ($user, $rideId) {
+            $ride = Ride::with('bookings.user')->lockForUpdate()->findOrFail($rideId);
 
-            $ride = $this->rideRepository->getRideById($rideId);
-
-            // Check if user is the driver
             if ($ride->driver_id !== $user->id) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Only the ride driver can cancel the ride'
-                ], 403);
+                abort(403, 'Only the ride driver can cancel the ride');
             }
 
-            // Get all bookings before cancellation
-            $bookings = $ride->bookings()->with('user')->get();
+            $bookings = $ride->bookings()
+                ->whereIn('status', [Booking::PENDING, Booking::CONFIRMED])
+                ->get();
 
-            // Cancel the ride
-            $cancelledRide = $this->rideRepository->cancelRide($rideId, $user->id);
+            // 1. mark every seat as cancelled
+            foreach ($bookings as $booking) {
+                $booking->status = Booking::CANCELLED;
+                $booking->save();
+            }
 
-            // Notify all passengers about cancellation
+            // 2. give seats back
+            $ride->available_seats += $bookings->sum('seats');
+            $ride->status          = 'cancelled';
+            $ride->save();
+
+            // 3. notify passengers
             foreach ($bookings as $booking) {
                 $this->notificationService->createNotification(
                     $booking->user,
                     'ride_cancelled',
                     'Ride Cancelled',
-                    "Unfortunately, the ride from {$ride->pickup_address} to {$ride->destination_address} scheduled for {$ride->departure_time->format('M j, Y \a\t g:i A')} has been cancelled by the driver. You will receive a full refund.",
+                    "The ride from {$ride->pickup_address} to {$ride->destination_address} was cancelled. Your refund is on the way.",
                     [
-                        'ride_id' => $ride->id,
-                        'booking_id' => $booking->id,
-                        'driver_id' => $ride->driver_id,
-                        'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                        'ride_id'       => $ride->id,
+                        'booking_id'    => $booking->id,
                         'refund_amount' => $booking->seats * $ride->price_per_seat,
-                        'pickup_address' => $ride->pickup_address,
-                        'destination_address' => $ride->destination_address,
-                        'original_departure_time' => $ride->departure_time->toISOString(),
-                        'cancellation_time' => now()->toISOString(),
                     ],
                     'high',
                     'ride'
                 );
             }
 
-            // Send confirmation to driver
-            $this->notificationService->createNotification(
-                $user,
-                'ride_cancelled_confirmation',
-                'Ride Cancelled',
-                "Your ride from {$ride->pickup_address} to {$ride->destination_address} has been cancelled successfully. All passengers have been notified and will receive refunds.",
-                [
-                    'ride_id' => $ride->id,
-                    'passengers_count' => $bookings->count(),
-                    'total_bookings' => $bookings->sum('seats'),
-                    'pickup_address' => $ride->pickup_address,
-                    'destination_address' => $ride->destination_address,
-                    'cancellation_time' => now()->toISOString(),
-                ],
-                'normal',
-                'ride'
-            );
-
-            // Broadcast ride cancelled event
             broadcast(new RideCancelled($ride, $bookings->toArray(), $user));
-
-            DB::commit();
-
-            Log::info('Ride cancelled successfully', [
-                'ride_id' => $ride->id,
-                'driver_id' => $user->id,
-                'passengers_notified' => $bookings->count(),
-                'total_seats_cancelled' => $bookings->sum('seats')
-            ]);
 
             return response()->json([
                 'success' => true,
-                'data' => $this->formatRideResponse($cancelledRide),
-                'message' => "Ride cancelled successfully. {$bookings->count()} passenger(s) have been notified."
-            ], 200);
-
-        } catch (ModelNotFoundException $e) {
-            DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Ride not found or you are not the driver'
-            ], 404);
-        } catch (\Exception $e) {
-            DB::rollBack();
-
-            Log::error('Ride cancellation failed', [
-                'ride_id' => $rideId,
-                'driver_id' => $user->id,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'data'    => $this->formatRideResponse($ride),
+                'message' => "Ride cancelled. {$bookings->count()} passenger(s) refunded.",
             ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage()
-            ], 400);
-        }
+        });
     }
 
     /**
@@ -981,7 +929,7 @@ class RideController extends Controller
         }
 
         try {
-            // SOURCE: either geocode the address, or use the raw coords
+            // Handle source location
             if ($request->filled('source_address')) {
                 $passengerSource = $this->geo->geocodeAddress($request->source_address);
             } else {
@@ -992,7 +940,7 @@ class RideController extends Controller
                 ];
             }
 
-            // DESTINATION: same pattern
+            // Handle destination location
             if ($request->filled('destination_address')) {
                 $passengerDest = $this->geo->geocodeAddress($request->destination_address);
             } else {
@@ -1016,13 +964,11 @@ class RideController extends Controller
                 'success' => true,
                 'data'    => $rides->map(fn($ride) => $this->formatRideResponse($ride)),
             ], 200);
-
         } catch (\Exception $e) {
             Log::error('Ride search failed', [
                 'error' => $e->getMessage(),
                 'search_params' => $request->all()
             ]);
-
             return response()->json([
                 'success' => false,
                 'message' => 'Search failed: ' . $e->getMessage(),
@@ -1153,21 +1099,17 @@ class RideController extends Controller
             ],
             'pickup' => [
                 'address'     => $ride->pickup_address,
-                'coordinates' => $ride->pickup_location
-                    ? [
-                        'lat' => $ride->pickup_location['lat'],
-                        'lng' => $ride->pickup_location['lng'],
-                    ]
-                    : null,
+                'coordinates' => $ride->pickup_location ? [
+                    'lat' => $ride->pickup_location['lat'],
+                    'lng' => $ride->pickup_location['lng'],
+                ] : null,
             ],
             'destination' => [
                 'address'     => $ride->destination_address,
-                'coordinates' => $ride->destination_location
-                    ? [
-                        'lat' => $ride->destination_location['lat'],
-                        'lng' => $ride->destination_location['lng'],
-                    ]
-                    : null,
+                'coordinates' => $ride->destination_location ? [
+                    'lat' => $ride->destination_location['lat'],
+                    'lng' => $ride->destination_location['lng'],
+                ] : null,
             ],
             'departure' => $ride->departure_time->toIso8601String(),
             'seats_available' => $ride->available_seats,
@@ -1183,14 +1125,15 @@ class RideController extends Controller
                 'minutes' => round($ride->duration / 60),
             ],
             'vehicle_type' => $ride->vehicle_type,
-            'payment_method' => $ride->payment_method, // Added payment method
+            'payment_method' => $ride->payment_method,
+            'booking_type' => $ride->booking_type, // New field
             'notes' => $ride->notes,
             'created_at' => $ride->created_at->toIso8601String(),
             'chosen_route_index' => $ride->chosen_route_index,
             'route_geometry' => $ride->route_geometry,
+            'communication_number' => $ride->communication_number,
         ];
     }
-
     /**
      * Format ride details response
      */
@@ -1225,7 +1168,8 @@ class RideController extends Controller
             'driver_id' => $booking->ride->driver_id,
             'passenger_id' => $booking->user_id,
             'seats' => $booking->seats,
-            'status' => $booking->status ?? 'confirmed',
+            'status' => $booking->status,
+            'communication_number' => $booking->communication_number,
             'total_price' => $booking->seats * $booking->ride->price_per_seat,
             'booking_date' => $booking->created_at->toIso8601String(),
             'ride_details' => [
@@ -1377,11 +1321,10 @@ class RideController extends Controller
                 ], 403);
             }
 
-            // Check if ride is active
-            if ($ride->status !== 'active') {
+            if (!in_array($ride->status, ['active', 'full'])) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Only active rides can be finished'
+                    'message' => 'Only active or full rides can be finished'
                 ], 400);
             }
 
@@ -1462,6 +1405,9 @@ class RideController extends Controller
     /**
      * Complete ride and release payments (called when all confirmations are received)
      */
+    /**
+     * Complete ride and release payments (called when all confirmations are received)
+     */
     private function completeRideAndReleasePayments(Ride $ride)
     {
         try {
@@ -1480,41 +1426,48 @@ class RideController extends Controller
                     return $booking->seats * $ride->price_per_seat;
                 });
 
-                // Get admin wallet
+                // Lock wallets for update to prevent concurrent access
                 $adminWallet = Wallet::whereHas('user', function($query) {
                     $query->where('email', 'twisrmann2002@gmail.com');
                 })->lockForUpdate()->first();
 
-                if (!$adminWallet) {
-                    throw new \Exception('Admin wallet not found');
-                }
-
-                // Get driver's wallet
                 $driverWallet = Wallet::where('user_id', $ride->driver_id)
                     ->lockForUpdate()
                     ->first();
 
-                if (!$driverWallet) {
-                    throw new \Exception('Driver wallet not found');
+                if (!$adminWallet || !$driverWallet) {
+                    throw new \Exception('Admin or driver wallet not found');
                 }
 
-                // Check admin wallet balance
-                if ($adminWallet->balance < $totalAmount) {
-                    throw new \Exception('Insufficient admin wallet balance');
+                // Get current balances AFTER locking
+                $adminBalance = $adminWallet->balance;
+                $driverBalance = $driverWallet->balance;
+
+                // Verify admin has sufficient funds
+                if ($adminBalance < $totalAmount) {
+                    throw new \Exception("Insufficient admin wallet balance. Required: $totalAmount, Available: $adminBalance");
                 }
 
-                // Transfer funds
-                $adminWallet->balance -= $totalAmount;
+                // Perform atomic balance updates
+                $adminWallet->balance = $adminBalance - $totalAmount;
+                $driverWallet->balance = $driverBalance + $totalAmount;
+
                 $adminWallet->save();
-
-                $driverWallet->balance += $totalAmount;
                 $driverWallet->save();
 
-                // Process the wallet transfer and create transaction records
-                $this->processRideCompletionTransfer($adminWallet, $driverWallet, $totalAmount, $ride, $confirmedBookings);
+                // Create transaction records
+                $this->createRideCompletionTransactions(
+                    $adminWallet,
+                    $driverWallet,
+                    $adminBalance,
+                    $driverBalance,
+                    $totalAmount,
+                    $ride,
+                    $confirmedBookings
+                );
             } else {
-                // For cash rides, just log that no transfer is needed
-                Log::info('Cash ride completed - no wallet transfer needed', [
+                // For cash rides, log that no transfer occurred
+                Log::info('Cash ride completed - no wallet transfer', [
                     'ride_id' => $ride->id,
                     'driver_id' => $ride->driver_id,
                     'total_cash_amount' => $confirmedBookings->sum(function ($booking) use ($ride) {
@@ -1523,7 +1476,7 @@ class RideController extends Controller
                 ]);
             }
 
-            // Update ride status for both payment methods
+            // Update ride status
             $ride->status = 'finished';
             $ride->passengers_confirmed = true;
             $ride->save();
@@ -1539,27 +1492,28 @@ class RideController extends Controller
 
             // Send notifications
             $this->sendCompletionNotifications($ride, $totalAmount ?? 0);
-
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Ride completion payment failed', [
+            Log::error('Ride completion failed', [
                 'ride_id' => $ride->id,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
         }
     }
 
+
     /**
      * Send completion notifications
-     */
-    private function sendCompletionNotifications(Ride $ride, $totalAmount)
+   */
+    private function sendCompletionNotifications(Ride $ride, $amount)
     {
         // Notify driver
         $this->notificationService->createNotification(
             $ride->driver,
             'ride_completed_earnings',
             'Ride Completed - Payment Received',
-            "You've received $" . number_format($totalAmount, 2) . " for your ride",
+            "You've received $" . number_format($amount, 2) . " for your ride",
             ['ride_id' => $ride->id],
             'high',
             'ride'
@@ -1584,86 +1538,349 @@ class RideController extends Controller
      */
     private function processRideCompletionTransfer($adminWallet, $driverWallet, $amount, $ride, $bookings)
     {
-        // Update admin wallet (deduct money)
-        $adminPreviousBalance = $adminWallet->balance;
-        $adminNewBalance = $adminPreviousBalance - $amount;
-        $adminWallet->balance = $adminNewBalance;
-        $adminWallet->save();
+        try {
+            // Refresh wallets to get current balances
+            $adminWallet = $adminWallet->fresh();
+            $driverWallet = $driverWallet->fresh();
 
-        // Update driver wallet (add money)
-        $driverPreviousBalance = $driverWallet->balance;
-        $driverNewBalance = $driverPreviousBalance + $amount;
-        $driverWallet->balance = $driverNewBalance;
-        $driverWallet->save();
+            // Update admin wallet (deduct money)
+            $adminPreviousBalance = $adminWallet->balance;
+            $adminNewBalance = $adminPreviousBalance - $amount;
+            $adminWallet->balance = $adminNewBalance;
+            $adminWallet->save();
 
-        // Generate transaction ID
-        $transactionId = 'RIDE_COMPLETION_' . time() . '_' . Str::random(8);
+            // Update driver wallet (add money)
+            $driverPreviousBalance = $driverWallet->balance;
+            $driverNewBalance = $driverPreviousBalance + $amount;
+            $driverWallet->balance = $driverNewBalance;
+            $driverWallet->save();
 
-        // Create transaction record for admin (debit)
+            // Generate transaction ID
+            $transactionId = 'RIDE_COMPLETION_' . time() . '_' . Str::random(8);
+
+            // Create transaction record for admin (debit)
+            WalletTransaction::create([
+                'wallet_id' => $adminWallet->id,
+                'user_id' => $adminWallet->user_id,
+                'type' => 'ride_completion_payment',
+                'amount' => -$amount,
+                'previous_balance' => $adminPreviousBalance,
+                'new_balance' => $adminNewBalance,
+                'description' => "Payment to driver for completed ride from {$ride->pickup_address} to {$ride->destination_address}",
+                'transaction_id' => 'ADMIN_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'ride_id' => $ride->id,
+                    'driver_id' => $ride->driver_id,
+                    'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                    'passengers_count' => $bookings->count(),
+                    'total_seats' => $bookings->sum('seats'),
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'completion_time' => now()->toDateTimeString(),
+                    'transaction_type' => 'debit'
+                ]
+            ]);
+
+            // Create transaction record for driver (credit)
+            WalletTransaction::create([
+                'wallet_id' => $driverWallet->id,
+                'user_id' => $driverWallet->user_id,
+                'type' => 'ride_completion_earnings',
+                'amount' => $amount,
+                'previous_balance' => $driverPreviousBalance,
+                'new_balance' => $driverNewBalance,
+                'description' => "Earnings from completed ride from {$ride->pickup_address} to {$ride->destination_address}",
+                'transaction_id' => 'DRIVER_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'ride_id' => $ride->id,
+                    'passengers_served' => $bookings->count(),
+                    'total_seats' => $bookings->sum('seats'),
+                    'earnings_breakdown' => $bookings->map(function($booking) use ($ride) {
+                        return [
+                            'passenger_id' => $booking->user_id,
+                            'passenger_name' => "{$booking->user->first_name} {$booking->user->last_name}",
+                            'seats' => $booking->seats,
+                            'amount' => $booking->seats * $ride->price_per_seat
+                        ];
+                    })->toArray(),
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'completion_time' => now()->toDateTimeString(),
+                    'transaction_type' => 'credit'
+                ]
+            ]);
+
+            Log::info('Ride completion wallet transfer completed', [
+                'admin_wallet_id' => $adminWallet->id,
+                'driver_wallet_id' => $driverWallet->id,
+                'amount' => $amount,
+                'admin_previous_balance' => $adminPreviousBalance,
+                'admin_new_balance' => $adminNewBalance,
+                'driver_previous_balance' => $driverPreviousBalance,
+                'driver_new_balance' => $driverNewBalance,
+                'ride_id' => $ride->id,
+                'transaction_id' => $transactionId
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Ride completion wallet transfer failed', [
+                'admin_wallet_id' => $adminWallet->id,
+                'driver_wallet_id' => $driverWallet->id,
+                'amount' => $amount,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
+        }
+    }
+    // RideController.php - acceptBooking method
+    public function acceptBooking(Request $request, int $bookingId)
+    {
+        $user = $request->user();
+        return DB::transaction(function () use ($user, $bookingId) {
+            // Load booking with relationships and lock for update
+            $booking = Booking::with(['ride', 'user.wallet'])
+                ->lockForUpdate()
+                ->findOrFail($bookingId);
+
+            $ride = $booking->ride;
+            $passenger = $booking->user;
+
+            // Validate driver ownership
+            if ($ride->driver_id !== $user->id) {
+                abort(403, 'Only the ride driver can accept bookings');
+            }
+
+            // Validate booking type
+            if ($ride->booking_type !== 'request') {
+                abort(400, 'Accept/Reject available only for request-type rides');
+            }
+
+            // Validate booking status
+            if ($booking->status !== Booking::PENDING) {
+                abort(400, 'Booking already handled');
+            }
+
+            // Check available seats
+            if ($ride->available_seats < $booking->seats) {
+                abort(400, 'Not enough available seats');
+            }
+
+            // Update booking status
+            $booking->status = Booking::CONFIRMED;
+            $booking->save();
+
+            // Decrement available seats
+            $ride->decrement('available_seats', $booking->seats);
+
+            // Calculate total cost
+            $totalCost = $booking->seats * $ride->price_per_seat;
+
+            // Process payment for e-pay rides
+            $paymentProcessed = false;
+            if ($ride->payment_method === 'e-pay') {
+                // Get passenger wallet with lock
+                $passengerWallet = Wallet::where('user_id', $passenger->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                // Get admin wallet
+                $adminWallet = Wallet::whereHas('user', function($query) {
+                    $query->where('email', 'twisrmann2002@gmail.com');
+                })->lockForUpdate()->firstOrFail();
+
+                // Verify passenger balance
+                if ($passengerWallet->balance < $totalCost) {
+                    throw new \Exception('Passenger has insufficient wallet balance');
+                }
+
+                // Process payment
+                $this->processWalletTransfer(
+                    $passengerWallet,
+                    $adminWallet,
+                    $totalCost,
+                    $booking,
+                    $ride
+                );
+
+                $paymentProcessed = true;
+            }
+
+            // Check if ride is full
+            if ($ride->available_seats <= 0) {
+                $this->notifyRideFull($ride);
+                $ride->status = 'full';
+                $ride->save();
+            }
+
+            // Notify passenger
+            $paymentMessage = $paymentProcessed
+                ? "Payment of $" . number_format($totalCost, 2) . " has been processed."
+                : "You'll pay the driver $" . number_format($totalCost, 2) . " in cash.";
+
+            $this->notificationService->createNotification(
+                $passenger,
+                'booking_accepted',
+                'Booking Accepted',
+                "Your booking request was accepted! " . $paymentMessage,
+                [
+                    'ride_id' => $ride->id,
+                    'booking_id' => $booking->id,
+                    'driver_id' => $ride->driver_id,
+                    'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                    'seats_booked' => $booking->seats,
+                    'total_price' => $totalCost,
+                    'payment_method' => $ride->payment_method,
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'departure_time' => $ride->departure_time->toISOString(),
+                ],
+                'high',
+                'ride'
+            );
+
+            // Log successful acceptance
+            Log::info('Booking accepted', [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'driver_id' => $user->id,
+                'passenger_id' => $passenger->id,
+                'seats' => $booking->seats,
+                'total_cost' => $totalCost,
+                'payment_processed' => $paymentProcessed,
+                'new_ride_status' => $ride->status
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Booking accepted successfully',
+                'payment_processed' => $paymentProcessed,
+                'amount_charged' => $paymentProcessed ? $totalCost : 0,
+                'ride_status' => $ride->status
+            ]);
+        });
+    }
+
+    public function rejectBooking(Request $request, int $bookingId)
+    {
+        $user = $request->user();
+
+        return DB::transaction(function () use ($user, $bookingId) {
+            $booking = Booking::with('ride')->lockForUpdate()->findOrFail($bookingId);
+            $ride = $booking->ride;
+
+            if ($ride->driver_id !== $user->id) abort(403);
+            if ($ride->booking_type !== 'request') abort(400);
+            if ($booking->status !== Booking::PENDING) abort(400);
+
+            $booking->status = Booking::CANCELLED;
+            $booking->save();
+
+            // Return seat to ride
+            $ride->increment('available_seats', $booking->seats);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Booking rejected'
+            ]);
+        });
+    }
+    public function cancelSeat(Request $request, int $bookingId)
+    {
+        $user = $request->user();
+
+        return DB::transaction(function () use ($user, $bookingId) {
+            $booking = Booking::with('ride')->lockForUpdate()->findOrFail($bookingId);
+            $ride = $booking->ride;
+
+            if ($booking->user_id !== $user->id) abort(403);
+
+            if (!$booking->canBeCancelled()) {
+                abort(400, 'Booking cannot be cancelled');
+            }
+
+            $booking->status = Booking::CANCELLED;
+            $booking->save();
+
+            $ride->increment('available_seats', $booking->seats);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Seat cancelled successfully'
+            ]);
+        });
+    }
+    private function createRideCompletionTransactions(
+        $adminWallet,
+        $driverWallet,
+        $adminPreviousBalance,
+        $driverPreviousBalance,
+        $amount,
+        $ride,
+        $bookings
+    ) {
+        $transactionId = 'RIDE_COMP_' . time() . '_' . Str::random(6);
+
+        // Admin transaction (debit)
         WalletTransaction::create([
             'wallet_id' => $adminWallet->id,
             'user_id' => $adminWallet->user_id,
-            'type' => 'ride_completion_payment',
-            'amount' => -$amount, // Negative for debit
+            'type' => 'ride_payout',
+            'amount' => -$amount,
             'previous_balance' => $adminPreviousBalance,
-            'new_balance' => $adminNewBalance,
-            'description' => "Payment to driver for completed ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'new_balance' => $adminWallet->balance,
+            'description' => "Payment to driver for completed ride",
             'transaction_id' => 'ADMIN_' . $transactionId,
             'status' => 'completed',
             'metadata' => [
                 'ride_id' => $ride->id,
                 'driver_id' => $ride->driver_id,
                 'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
-                'passengers_count' => $bookings->count(),
-                'total_seats' => $bookings->sum('seats'),
-                'pickup_address' => $ride->pickup_address,
-                'destination_address' => $ride->destination_address,
-                'completion_time' => now()->toDateTimeString(),
-                'transaction_type' => 'debit'
+                'passenger_count' => $bookings->count(),
+                'total_amount' => $amount,
+                'pickup' => $ride->pickup_address,
+                'destination' => $ride->destination_address
             ]
         ]);
 
-        // Create transaction record for driver (credit)
+        // Driver transaction (credit)
         WalletTransaction::create([
             'wallet_id' => $driverWallet->id,
             'user_id' => $driverWallet->user_id,
-            'type' => 'ride_completion_earnings',
-            'amount' => $amount, // Positive for credit
+            'type' => 'ride_earnings',
+            'amount' => $amount,
             'previous_balance' => $driverPreviousBalance,
-            'new_balance' => $driverNewBalance,
-            'description' => "Earnings from completed ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'new_balance' => $driverWallet->balance,
+            'description' => "Earnings from completed ride",
             'transaction_id' => 'DRIVER_' . $transactionId,
             'status' => 'completed',
             'metadata' => [
                 'ride_id' => $ride->id,
-                'passengers_served' => $bookings->count(),
-                'total_seats' => $bookings->sum('seats'),
-                'earnings_breakdown' => $bookings->map(function($booking) use ($ride) {
+                'passenger_count' => $bookings->count(),
+                'breakdown' => $bookings->map(function($booking) use ($ride) {
                     return [
                         'passenger_id' => $booking->user_id,
-                        'passenger_name' => "{$booking->user->first_name} {$booking->user->last_name}",
                         'seats' => $booking->seats,
                         'amount' => $booking->seats * $ride->price_per_seat
                     ];
                 })->toArray(),
-                'pickup_address' => $ride->pickup_address,
-                'destination_address' => $ride->destination_address,
-                'completion_time' => now()->toDateTimeString(),
-                'transaction_type' => 'credit'
+                'pickup' => $ride->pickup_address,
+                'destination' => $ride->destination_address
             ]
         ]);
 
-        Log::info('Ride completion wallet transfer completed', [
-            'admin_wallet_id' => $adminWallet->id,
-            'driver_wallet_id' => $driverWallet->id,
+        Log::info('Ride payment processed', [
+            'admin_wallet' => $adminWallet->id,
+            'driver_wallet' => $driverWallet->id,
             'amount' => $amount,
-            'admin_balance' => $adminNewBalance,
-            'driver_balance' => $driverNewBalance,
-            'ride_id' => $ride->id,
-            'transaction_id' => $transactionId
+            'admin_balance_before' => $adminPreviousBalance,
+            'admin_balance_after' => $adminWallet->balance,
+            'driver_balance_before' => $driverPreviousBalance,
+            'driver_balance_after' => $driverWallet->balance
         ]);
     }
-
 
 
 }

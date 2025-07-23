@@ -102,6 +102,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{rideId}/finish', [RideController::class, 'finishRide']);
         Route::post('/{ride}/driver-confirm', [RideController::class, 'driverConfirmCompletion']);
         Route::post('/{booking}/passenger-confirm', [RideController::class, 'passengerConfirmCompletion']);
+        Route::post('/{bookingId}/accept', [RideController::class, 'acceptBooking']);
+        Route::post('/{bookingId}/reject', [RideController::class, 'rejectBooking']);
+        Route::post('/bookings/{bookingId}/cancel-seat', [RideController::class, 'cancelSeat']);
     });
 
     // Autocomplete route (separate from rides)

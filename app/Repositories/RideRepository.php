@@ -118,10 +118,11 @@ class RideRepository implements RideRepositoryInterface
             $ride->departure_time      = Carbon::parse($data['departure_time'])
                 ->toDateTimeString();
             $ride->available_seats     = $data['available_seats'];
+            $ride->payment_method = $data['payment_method'];
             $ride->price_per_seat      = $data['price_per_seat'];
             $ride->vehicle_type        = $data['vehicle_type'];
             $ride->notes               = $data['notes'] ?? null;
-
+            $ride->booking_type        = $data['booking_type'] ?? 'direct';
             // ────────────────────────────────────────────────────────────
             // 5) Assign spatial columns via Eloquent mutators
             //     (assuming Ride model has setPickupLocationAttribute & setDestinationLocationAttribute)
@@ -280,37 +281,35 @@ class RideRepository implements RideRepositoryInterface
      * @return Booking
      * @throws \Exception
      */
+
     public function bookRide(int $rideId, array $bookingData): Booking
     {
-        Log::info('RideRepository: Booking ride', [
-            'ride_id' => $rideId,
-            'user_id' => $bookingData['user_id'] ?? null,
-            'seats' => $bookingData['seats'],
-            'status' => 'confirmed'
-        ]);
-
         return DB::transaction(function () use ($rideId, $bookingData) {
             $ride = Ride::lockForUpdate()->findOrFail($rideId);
 
-            if ($ride->available_seats < $bookingData['seats']) {
-                throw new \Exception('Not enough available seats', 400);
-            }
-
-            // 🔧 Ensure ride_id is included explicitly
             $booking = Booking::create([
                 'user_id' => $bookingData['user_id'],
                 'ride_id' => $rideId,
                 'seats' => $bookingData['seats'],
-                'status' => 'confirmed'
+                'status' => $bookingData['status'],
+                'communication_number' => $bookingData['communication_number'] ?? null,
             ]);
 
-            $ride->decrement('available_seats', $bookingData['seats']);
+            // Only decrement seats for confirmed bookings
+            if ($booking->status === Booking::CONFIRMED) {
+                $ride->decrement('available_seats', $bookingData['seats']);
 
-            Log::info('RideRepository: Ride booked', ['booking_id' => $booking->id]);
+                // Check if ride is full after booking
+                if ($ride->available_seats <= 0) {
+                    $ride->status = 'full';
+                    $ride->save();
+                }
+            }
 
             return $booking->load('user', 'ride');
         });
     }
+
 
 
     /**
@@ -319,17 +318,70 @@ class RideRepository implements RideRepositoryInterface
      * @param array $criteria
      * @return Collection
      */
+    // RideRepository.php - searchRides method
     public function searchRides(array $params): Collection
     {
         $query = Ride::query()
             ->whereDate('departure_time', '=', Carbon::parse($params['departure_date']))
             ->where('available_seats', '>=', $params['seats_required'])
-            ->where('status', 'active');
+            ->where('status', 'active'); // Only show active rides (excludes full/cancelled)
 
         // Add spatial filters
         $this->applySpatialFilters($query, $params);
 
         return $query->with('driver')->get();
+    }
+
+// RideController.php - notifyRideFull method (updated)
+    private function notifyRideFull($ride)
+    {
+        try {
+            // Notify passengers who booked this ride
+            foreach ($ride->bookings as $booking) {
+                $this->notificationService->createNotification(
+                    $booking->user,
+                    'ride_full',
+                    'Ride Full',
+                    "The ride from {$ride->pickup_address} to {$ride->destination_address} is now full",
+                    [
+                        'ride_id' => $ride->id,
+                        'pickup_address' => $ride->pickup_address,
+                        'destination_address' => $ride->destination_address,
+                        'departure_time' => $ride->departure_time->toISOString(),
+                    ],
+                    'normal',
+                    'ride'
+                );
+            }
+
+            // Notify driver
+            $this->notificationService->createNotification(
+                $ride->driver,
+                'ride_full',
+                'Ride Full',
+                "Your ride from {$ride->pickup_address} to {$ride->destination_address} is now full",
+                [
+                    'ride_id' => $ride->id,
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'departure_time' => $ride->departure_time->toISOString(),
+                ],
+                'normal',
+                'ride'
+            );
+
+            Log::info('Ride marked as full', [
+                'ride_id' => $ride->id,
+                'driver_id' => $ride->driver_id,
+                'bookings_count' => $ride->bookings->count(),
+                'total_seats_booked' => $ride->bookings->sum('seats')
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Failed to notify about full ride', [
+                'ride_id' => $ride->id,
+                'error' => $e->getMessage()
+            ]);
+        }
     }
 
     private function applySpatialFilters(EloquentBuilder $query, array $params)
@@ -415,9 +467,11 @@ class RideRepository implements RideRepositoryInterface
             $ride->departure_time = Carbon::parse($data['departure_time']);
             $ride->available_seats = $data['available_seats'];
             $ride->price_per_seat = $data['price_per_seat'];
+            $ride->payment_method = $data['payment_method'];
             $ride->vehicle_type = $data['vehicle_type'];
             $ride->notes = $data['notes'] ?? null;
-
+            $ride->booking_type = $data['booking_type'] ?? 'direct';
+            $ride->communication_number = $data['communication_number'] ?? null;
             $ride->pickup_location = [
                 'lat' => $data['pickup_location']['lat'],
                 'lng' => $data['pickup_location']['lng'],
