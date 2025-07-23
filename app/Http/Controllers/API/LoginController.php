@@ -2,11 +2,10 @@
 
 namespace App\Http\Controllers\API;
 
-use App\Http\Controllers\Controller; // Add this line
+use App\Http\Controllers\Controller;
 use App\Interfaces\UserRepositoryInterface;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Hash;
 
 class LoginController extends Controller
 {
@@ -16,7 +15,6 @@ class LoginController extends Controller
         $this->userRepository = $userRepository;
     }
 
-    // app/Http/Controllers/API/LoginController.php
     public function __invoke(Request $request)
     {
         $credentials = $request->validate([
@@ -28,11 +26,21 @@ class LoginController extends Controller
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
 
-        // Update status to 1 (active)
+        // Update user status to active
         $user = Auth::user();
         $user->update(['status' => 1]);
 
         return response()->json([
+            'user' => $user->only([
+                'id',
+                'first_name',
+                'last_name',
+                'email',
+                'gender',
+                'address',
+                'status',
+                'created_at'
+            ]),
             'access_token' => $user->createToken('auth-token')->plainTextToken,
             'token_type' => 'Bearer'
         ]);

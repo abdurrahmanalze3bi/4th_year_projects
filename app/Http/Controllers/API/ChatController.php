@@ -187,49 +187,65 @@ class ChatController extends Controller
                 ], 422);
             }
 
-            $messageTypeHandler = $this->messageTypeFactory->create($messageType);
+            $handler = $this->messageTypeFactory->create($messageType);
 
-            // Validate message data
-            if (!$messageTypeHandler->validate($request->all())) {
+            if (!$handler->validate($request->all())) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Invalid message data'
                 ], 422);
             }
 
-            // Process message
-            $processedData = $messageTypeHandler->process($request->all());
+            /* -----------------------------------------------------------------
+             *  IMAGE HANDLING
+             * ----------------------------------------------------------------- */
+            $content  = $request->input('content');
+            $metadata = $request->input('metadata', []);
 
-            // Send message
+            if ($messageType === 'image' && $request->hasFile('image')) {
+                $senderId   = $request->user()->id;
+                $receiverId = $conversation->participants()
+                    ->where('user_id', '!=', $senderId)
+                    ->value('user_id');
+
+                $ext      = $request->file('image')->getClientOriginalExtension();
+                $filename = "{$senderId}_{$receiverId}_" . now()->timestamp . ".{$ext}";
+
+                $path = $request->file('image')
+                    ->storeAs('chat-images', $filename, 'public');
+
+                $content  = $path;                 // store path in messages.content
+                $metadata = array_merge($metadata, ['image_url' => asset("storage/{$path}")]);
+            } else {
+                $processed = $handler->process($request->all());
+                $content   = $processed['content'];
+                $metadata  = array_merge($metadata, $processed['metadata']);
+            }
+
+            /* ----------------------------------------------------------------- */
             $message = $this->chatRepository->sendMessage(
                 $conversationId,
                 $request->user()->id,
-                $processedData['content'],
+                $content,
                 $messageType,
-                $processedData['metadata']
+                $metadata
             );
 
-            // Broadcast event (with error handling for testing)
-            try {
-                broadcast(new MessageSent($message));
-            } catch (\Exception $e) {
-                // Log the error but don't break the API response
-                \Log::warning('Broadcasting failed: ' . $e->getMessage());
-            }
+            broadcast(new MessageSent($message));
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'id' => $message->id,
+                    'id'              => $message->id,
                     'conversation_id' => $message->conversation_id,
                     'sender' => [
-                        'id' => $message->sender->id,
+                        'id'   => $message->sender->id,
                         'name' => $message->sender->first_name . ' ' . $message->sender->last_name,
                     ],
-                    'type' => $message->type,
-                    'content' => $message->content,
-                    'metadata' => $message->metadata,
-                    'created_at' => $message->created_at->toIso8601String(),
+                    'type'        => $message->type,
+                    'content'     => $message->content,
+                    'metadata'    => $message->metadata,
+                    'created_at'  => $message->created_at->toIso8601String(),
                 ]
             ], 201);
 

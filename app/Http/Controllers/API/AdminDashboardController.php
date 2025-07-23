@@ -42,6 +42,10 @@ class AdminDashboardController extends Controller
      * Admin login
      * POST /admin/login
      */
+    private function isPrimaryAdmin(): bool
+{
+    return Session::get('admin_email') === self::ADMIN_CONFIGS['primary']['email'];
+}
     public function login(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -380,7 +384,9 @@ class AdminDashboardController extends Controller
      * POST /admin/wallet/charge
      */
     public function chargeWallet(Request $request)
-    {
+    {if (!$this->isPrimaryAdmin()) {
+        return response()->json(['status' => 'error', 'message' => 'Access denied'], 403);
+    }
         if (!$this->validateAdminSession()) {
             return response()->json([
                 'status' => 'error',
@@ -600,7 +606,9 @@ class AdminDashboardController extends Controller
         ]);
     }
     public function showReport(Request $request)
-    {
+    {if (!$this->isPrimaryAdmin()) {
+        return response()->json(['status' => 'error', 'message' => 'Access denied'], 403);
+    }
         if (!$this->validateAdminSession()) {
             return response()->json([
                 'status' => 'error',
@@ -803,5 +811,129 @@ class AdminDashboardController extends Controller
                 'system_message' => config('app.debug') ? $e->getMessage() : null
             ], 500);
         }
+    }
+    /**
+     * List pending passenger & driver verification requests
+     * GET /admin/verifications/pending
+     */
+    public function pendingVerifications(Request $request)
+    {
+        if (!$this->isPrimaryAdmin()) {
+            return response()->json(['status' => 'error', 'message' => 'Access denied'], 403);
+        }
+        if (!$this->validateAdminSession()) {
+            return response()->json(['status' => 'error', 'message' => 'Admin session expired'], 401);
+        }
+
+        $pending = User::with(['photos', 'profile'])
+            ->where('verification_status', 'pending')
+            ->get()
+            ->map(function ($u) {
+                // Determine verification type based on submitted documents
+                $documentTypes = $u->photos->pluck('type')->toArray();
+                $isDriver = in_array('license', $documentTypes) ||
+                    in_array('mechanic_card', $documentTypes) ||
+                    !empty($u->profile->car_pic);
+
+                return [
+                    'user_id'     => $u->id,
+                    'name'        => trim($u->first_name . ' ' . $u->last_name),
+                    'email'       => $u->email,
+                    'type'        => $isDriver ? 'driver' : 'passenger',
+                    'documents'   => $u->photos->map(fn ($p) => [
+                        'type' => $p->type,
+                        'url'  => asset("storage/{$p->path}")
+                    ]),
+                    'vehicle'     => optional($u->profile)->only([
+                        'type_of_car', 'color_of_car', 'number_of_seats', 'car_pic'
+                    ]),
+                    'created_at'  => $u->updated_at->toIso8601String()
+                ];
+            });
+
+        return response()->json(['success' => true, 'data' => $pending]);
+    }
+    /**
+     * Approve a passenger or driver verification
+     * POST /admin/verifications/{userId}/approve
+     */
+    public function approveVerification(Request $request, int $userId)
+    {
+        if (!$this->isPrimaryAdmin()) {
+            return response()->json(['status' => 'error', 'message' => 'Access denied'], 403);
+        }
+        if (!$this->validateAdminSession()) {
+            return response()->json(['status' => 'error', 'message' => 'Admin session expired'], 401);
+        }
+
+        try {
+            $user = User::with(['photos', 'profile'])->findOrFail($userId);
+            $repo = app(\App\Interfaces\VerificationRepositoryInterface::class);
+
+            // Automatically determine verification type
+            $documentTypes = $user->photos->pluck('type')->toArray();
+            $isDriver = in_array('license', $documentTypes) ||
+                in_array('mechanic_card', $documentTypes) ||
+                !empty($user->profile->car_pic);
+
+            $type = $isDriver ? 'driver' : 'passenger';
+
+            $verifiedUser = $type === 'passenger'
+                ? $repo->verifyPassenger($userId)
+                : $repo->verifyDriver($userId);
+
+            return response()->json([
+                'success' => true,
+                'message' => ucfirst($type) . ' verification approved',
+                'user'    => [
+                    'id' => $verifiedUser->id,
+                    'verification_status' => $verifiedUser->verification_status,
+                    'is_verified_passenger' => $verifiedUser->is_verified_passenger,
+                    'is_verified_driver' => $verifiedUser->is_verified_driver,
+                ]
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+    }
+    /**
+     * Reject a verification request
+     * POST /admin/verifications/{userId}/reject
+     */
+    public function rejectVerification(Request $request, int $userId)
+    {
+        if (!$this->isPrimaryAdmin()) {
+            return response()->json(['status' => 'error', 'message' => 'Access denied'], 403);
+        }
+        if (!$this->validateAdminSession()) {
+            return response()->json(['status' => 'error', 'message' => 'Admin session expired'], 401);
+        }
+
+        $user = User::with(['photos', 'profile'])->findOrFail($userId);
+
+        // Automatically determine verification type
+        $documentTypes = $user->photos->pluck('type')->toArray();
+        $isDriver = in_array('license', $documentTypes) ||
+            in_array('mechanic_card', $documentTypes) ||
+            !empty($user->profile->car_pic);
+
+        $type = $isDriver ? 'driver' : 'passenger';
+
+        $user->update([
+            'verification_status' => 'rejected',
+            'is_verified_passenger' => false,
+            'is_verified_driver' => false,
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => ucfirst($type) . ' verification rejected',
+            'user'    => [
+                'id' => $user->id,
+                'verification_status' => $user->verification_status,
+                'is_verified_passenger' => $user->is_verified_passenger,
+                'is_verified_driver' => $user->is_verified_driver,
+            ]
+        ]);
     }
 }

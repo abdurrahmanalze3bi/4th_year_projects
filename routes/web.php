@@ -23,6 +23,9 @@ Route::prefix('admin')->group(function () {
     Route::get('/wallet', [AdminDashboardController::class, 'getAdminWallet'])->name('admin.wallet');
     Route::get('/wallets/admins', [AdminDashboardController::class, 'getAdminWallets'])->name('admin.wallets.admins');
 
+    Route::get('/verifications/pending', [AdminDashboardController::class, 'pendingVerifications']);
+    Route::post('/verifications/{userId}/approve', [AdminDashboardController::class, 'approveVerification']);
+    Route::post('/verifications/{userId}/reject', [AdminDashboardController::class, 'rejectVerification']);
     // Wallets
     Route::get('/wallets', [AdminDashboardController::class, 'showWallets'])->name('admin.wallets');
 
