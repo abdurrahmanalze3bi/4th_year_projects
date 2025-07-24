@@ -102,8 +102,7 @@ class ProfileController extends Controller
 
         /* critical fields guard when pending */
         $critical = ['first_name', 'last_name', 'type_of_car', 'color_of_car', 'number_of_seats'];
-        if ($user->verification_status === 'pending'
-            && count(array_intersect(array_keys($data), $critical))) {
+        if ($user->verification_status === 'pending' && count(array_intersect(array_keys($data), $critical))) {
             return response()->json([
                 'success' => false,
                 'message' => 'Cannot change name or vehicle details while verification is pending',
@@ -120,26 +119,36 @@ class ProfileController extends Controller
             'mechanic_card_pic'   => 'mechanic_card',
         ];
 
-        $fileFields = array_merge(['profile_photo', 'car_pic'], array_keys($docTypeMap));
+        // Documents that require verification reset
+        $verificationDocuments = ['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic'];
 
-        foreach ($fileFields as $field) {
-            if (! $request->hasFile($field)) {
+        // Non-verification files (profile photo and car pic)
+        $nonVerificationFiles = ['profile_photo', 'car_pic'];
+
+        $allFileFields = array_merge($verificationDocuments, $nonVerificationFiles);
+
+        // Track if any verification documents are being updated
+        $verificationDocumentsUpdated = false;
+
+        foreach ($allFileFields as $field) {
+            if (!$request->hasFile($field)) {
                 continue;
             }
 
-            $ext      = $request->file($field)->getClientOriginalExtension();
+            $ext = $request->file($field)->getClientOriginalExtension();
             $filename = $user->id . '_' . now()->timestamp . '.' . $ext;
 
             if ($field === 'profile_photo') {
-                $folder   = 'profiles/profile_photo';
+                $folder = 'profiles/profile_photo';
                 $diskPath = "profiles/profile_photo/{$filename}";
             } elseif ($field === 'car_pic') {
-                $folder   = 'verifications/car_pic';
+                $folder = 'verifications/car_pic';
                 $diskPath = "verifications/car_pic/{$filename}";
             } else {
                 // verification documents
-                $folder   = "verifications/{$docTypeMap[$field]}";
+                $folder = "verifications/{$docTypeMap[$field]}";
                 $diskPath = "verifications/{$docTypeMap[$field]}/{$filename}";
+                $verificationDocumentsUpdated = true;
             }
 
             /* store and overwrite old file */
@@ -157,12 +166,22 @@ class ProfileController extends Controller
         /* ----------------------------------------------------------------- */
         try {
             $this->profileRepo->updateProfile($user->id, $data);
+
+            // Only reset verification status if verification documents were updated
+            if ($verificationDocumentsUpdated) {
+                $user->update([
+                    'verification_status'   => 'none',
+                    'is_verified_driver'    => false,
+                    'is_verified_passenger' => false,
+                ]);
+            }
+
             $profile = $this->profileRepo->getProfileWithUser($user->id);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Profile updated successfully',
-                'data'    => $this->formatProfileData($profile, $user),
+                'data'    => $this->formatProfileData($profile, $user->fresh()),
             ], 200);
 
         } catch (\Exception $e) {

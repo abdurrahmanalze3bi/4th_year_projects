@@ -23,10 +23,10 @@ class VerificationController extends Controller
         $this->profileRepo = $profileRepo;
     }
 
-    /**
-     * Submit passenger verification request
+    /* ------------------------------------------
+     * Passenger verification
      * POST /api/profile/verify/passenger
-     */
+     * ------------------------------------------ */
     public function verifyPassenger(Request $request)
     {
         return DB::transaction(function () use ($request) {
@@ -35,7 +35,7 @@ class VerificationController extends Controller
             if ($user->verification_status === 'pending') {
                 return response()->json([
                     'success' => false,
-                    'message' => 'You already have a pending verification request'
+                    'message' => 'You already have a pending verification request',
                 ], 409);
             }
 
@@ -45,64 +45,58 @@ class VerificationController extends Controller
             ]);
 
             if ($validator->fails()) {
-                return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
-            }
-
-            try {
-                $profile = $this->profileRepo->getProfileByUserId($user->id);
-                if (!$profile) {
-                    $this->profileRepo->updateProfile($user->id, []);
-                    $profile = $this->profileRepo->getProfileByUserId($user->id);
-                }
-
-                // exact ENUM values
-                $map = [
-                    'face_id_pic' => 'face_id',
-                    'back_id_pic' => 'back_id',
-                ];
-
-                $profileData = [];
-
-                foreach ($map as $inputName => $enumType) {
-                    if ($request->hasFile($inputName)) {
-                        $ext      = $request->file($inputName)->getClientOriginalExtension();
-                        $filename = $user->id . '_' . time() . '.' . $ext;
-                        $path     = $request->file($inputName)
-                            ->storeAs("verifications/{$enumType}", $filename, 'public');
-
-                        $this->photoRepo->deleteDocumentsByType($user->id, $enumType);
-                        $this->photoRepo->storeDocument($user->id, $enumType, $path);
-
-                        $profileData[$inputName] = $path;
-                    }
-                }
-
-                if (!empty($profileData)) {
-                    $this->profileRepo->updateProfile($profile->id, $profileData);
-                }
-
-                $user->update(['verification_status' => 'pending']);
-
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Verification request submitted',
-                    'status'  => $user->fresh()->verification_status
-                ], 201);
-
-            } catch (\Exception $e) {
-                DB::rollBack();
                 return response()->json([
                     'success' => false,
-                    'message' => 'Verification failed: ' . $e->getMessage()
-                ], 500);
+                    'errors'  => $validator->errors(),
+                ], 422);
             }
+
+            $profile = $this->profileRepo->getProfileByUserId($user->id)
+                ?: $this->profileRepo->updateProfile($user->id, []);
+
+            $map = [
+                'face_id_pic' => 'face_id',
+                'back_id_pic' => 'back_id',
+            ];
+
+            $profileData = [];
+
+            foreach ($map as $inputName => $enumType) {
+                if ($request->hasFile($inputName)) {
+                    $ext      = $request->file($inputName)->getClientOriginalExtension();
+                    $filename = $user->id . '_' . time() . '.' . $ext;
+                    $path     = $request->file($inputName)
+                        ->storeAs("verifications/{$enumType}", $filename, 'public');
+
+                    $this->photoRepo->deleteDocumentsByType($user->id, $enumType);
+                    $this->photoRepo->storeDocument($user->id, $enumType, $path);
+
+                    $profileData[$inputName] = $path;
+                }
+            }
+
+            if (!empty($profileData)) {
+                $this->profileRepo->updateProfile($profile->id, $profileData);
+            }
+
+            $user->update([
+                'verification_status'   => 'pending',
+                'is_verified_driver'    => false,
+                'is_verified_passenger' => false,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Verification request submitted',
+                'status'  => $user->fresh()->verification_status,
+            ], 201);
         });
     }
 
-    /**
-     * Submit driver verification request
+    /* ------------------------------------------
+     * Driver verification
      * POST /api/profile/verify/driver
-     */
+     * ------------------------------------------ */
     public function verifyDriver(Request $request)
     {
         $user = $request->user();
@@ -126,7 +120,10 @@ class VerificationController extends Controller
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+            return response()->json([
+                'success' => false,
+                'errors'  => $validator->errors(),
+            ], 422);
         }
 
         return DB::transaction(function () use ($request, $user) {
@@ -134,13 +131,12 @@ class VerificationController extends Controller
             $profile = $this->profileRepo->getProfileByUserId($userId)
                 ?: $this->profileRepo->updateProfile($userId, []);
 
-            // exact ENUM values
             $map = [
                 'face_id_pic'         => 'face_id',
                 'back_id_pic'         => 'back_id',
                 'driving_license_pic' => 'license',
                 'mechanic_card_pic'   => 'mechanic_card',
-                'car_pic'             => 'car_pic', // folder only, not stored in photos table
+                'car_pic'             => 'car_pic', // folder only
             ];
 
             $profileData = [];
@@ -152,8 +148,7 @@ class VerificationController extends Controller
                     $path     = $request->file($inputName)
                         ->storeAs("verifications/{$folder}", $filename, 'public');
 
-                    // store in photos table (except car_pic)
-                    if (in_array($inputName, ['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic'])) {
+                    if (in_array($inputName, ['face_id_pic', 'back_id_pic', 'driving_license_pic', 'mechanic_card_pic'], true)) {
                         $this->photoRepo->deleteDocumentsByType($userId, $map[$inputName]);
                         $this->photoRepo->storeDocument($userId, $map[$inputName], $path);
                     }
@@ -171,19 +166,23 @@ class VerificationController extends Controller
 
             $this->profileRepo->updateProfile($profile->id, array_merge($profileData, $vehicleData));
 
-            $user->update(['verification_status' => 'pending']);
+            $user->update([
+                'verification_status'   => 'pending',
+                'is_verified_driver'    => false,
+                'is_verified_passenger' => false,
+            ]);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Driver verification request submitted for review'
+                'message' => 'Driver verification request submitted for review',
             ], 201);
         });
     }
 
-    /**
-     * Check verification status
+    /* ------------------------------------------
+     * Status check
      * GET /api/profile/verify/status/{userId}
-     */
+     * ------------------------------------------ */
     public function status(int $userId)
     {
         try {
@@ -210,7 +209,7 @@ class VerificationController extends Controller
                     'type'  => $profile->type_of_car,
                     'color' => $profile->color_of_car,
                     'seats' => $profile->number_of_seats,
-                    'photo' => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null
+                    'photo' => $profile->car_pic ? asset("storage/{$profile->car_pic}") : null,
                 ] : null,
                 'verified'  => [
                     'passenger' => (bool) $user->is_verified_passenger,
@@ -221,7 +220,7 @@ class VerificationController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Failed to retrieve verification status: ' . $e->getMessage()
+                'message' => 'Failed to retrieve verification status: ' . $e->getMessage(),
             ], 500);
         }
     }
