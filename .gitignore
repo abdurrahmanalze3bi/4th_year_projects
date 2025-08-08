@@ -18,3 +18,7 @@ yarn-error.log
 /.idea
 /.vscode
 config/firebase-service-account.json
+
+.env.local
+.env.example
+*.env
