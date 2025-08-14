@@ -292,10 +292,9 @@ class RideRepository implements RideRepositoryInterface
                 'ride_id' => $rideId,
                 'seats' => $bookingData['seats'],
                 'status' => $bookingData['status'],
-                'communication_number' => $bookingData['communication_number'] ?? null,
+                'communication_number' => $bookingData['communication_number'] ?? " ",
             ]);
 
-            // Only decrement seats for confirmed bookings
             if ($booking->status === Booking::CONFIRMED) {
                 $ride->decrement('available_seats', $bookingData['seats']);
 

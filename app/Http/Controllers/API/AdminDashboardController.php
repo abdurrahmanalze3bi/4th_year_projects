@@ -135,7 +135,7 @@ class AdminDashboardController extends Controller
                 return;
             }
 
-            DB::beginTransaction();
+            DB::beginTransaction();//rollback
 
             // Create or find admin user
             $adminUser = User::firstOrCreate(
@@ -227,7 +227,7 @@ class AdminDashboardController extends Controller
         Session::forget('admin_logged_in');
         Session::forget('admin_email');
         Session::forget('admin_type');
-
+ //reds
         return response()->json([
             'status' => 'success',
             'message' => 'Logout successful'

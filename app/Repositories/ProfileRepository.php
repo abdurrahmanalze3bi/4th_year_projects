@@ -59,13 +59,18 @@ class ProfileRepository implements ProfileRepositoryInterface
 
 
 
+    // In app/Repositories/ProfileRepository.php
     public function createFromUser(User $user)
     {
         return $this->model->create([
             'user_id' => $user->id,
             'full_name' => $user->first_name.' '.$user->last_name,
             'address' => $user->address,
-            'gender' => $user->gender
+            'gender' => $user->gender,
+            'profile_photo' => 'profiles/profile_photo/default-profile-photo.jpg', // Add this line
+            'number_of_rides' => 0,
+            'radio' => false,
+            'smoking' => false
         ]);
     }
 }

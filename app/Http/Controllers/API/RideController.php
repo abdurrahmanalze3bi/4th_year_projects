@@ -348,9 +348,8 @@ class RideController extends Controller
             'available_seats'      => 'required|integer|min:1',
             'price_per_seat'       => 'required|numeric|min:0',
             'payment_method'       => 'required|in:cash,e-pay',
-            // In your RideController's validation rules
             'communication_number' => 'required|regex:/^09\d{8}$/',
-            'booking_type'         => 'required|in:direct,request', // New field
+            'booking_type'         => 'required|in:direct,request',
             'notes'                => 'nullable|string|max:500',
         ]);
 
@@ -1066,21 +1065,41 @@ class RideController extends Controller
     /**
      * Validate driver profile completeness
      */
-    private function validateDriverProfile($user)
-    {
+    /**
+     * Validate driver profile completeness - only check essential verification documents
+     */
+    private function validateDriverProfile($user) {
+        // Only check essential verification documents
         $requiredFields = [
-            'type_of_car', 'color_of_car', 'number_of_seats',
-            'car_pic', 'face_id_pic', 'back_id_pic',
-            'driving_license_pic', 'mechanic_card_pic'
+            'face_id_pic',         // Required for identity verification
+            'back_id_pic',         // Required for identity verification
+            'driving_license_pic', // Required for driver verification
+            'mechanic_card_pic'    // Required for vehicle safety verification
         ];
+
+        $missingFields = [];
 
         foreach ($requiredFields as $field) {
             if (!$user->profile || empty($user->profile->$field)) {
-                abort(response()->json([
-                    'success' => false,
-                    'message' => 'Complete your driver profile first'
-                ], 403));
+                $missingFields[] = $field;
             }
+        }
+
+        if (!empty($missingFields)) {
+            $fieldNames = [
+                'face_id_pic' => 'Face ID Photo',
+                'back_id_pic' => 'Back ID Photo',
+                'driving_license_pic' => 'Driving License Photo',
+                'mechanic_card_pic' => 'Mechanic Card Photo'
+            ];
+
+            $missingNames = array_map(fn($field) => $fieldNames[$field], $missingFields);
+
+            abort(response()->json([
+                'success' => false,
+                'message' => 'Missing required verification documents: ' . implode(', ', $missingNames),
+                'missing_fields' => $missingFields
+            ], 403));
         }
     }
 
@@ -1113,7 +1132,7 @@ class RideController extends Controller
             ],
             'departure' => $ride->departure_time->toIso8601String(),
             'seats_available' => $ride->available_seats,
-            'seats_booked' => $ride->bookings()->sum('seats') ?? 0,
+            'seats_booked' => (int) ($ride->bookings()->sum('seats') ?? 0),
             'price_per_seat'  => $ride->price_per_seat,
             'status' => $ride->status,
             'distance' => [
@@ -1149,7 +1168,7 @@ class RideController extends Controller
                     'avatar' => $booking->user->avatar,
                     'rating' => $booking->user->passenger_rating ?? 0,
                 ],
-                'seats'     => $booking->seats,
+                'seats' => (int) $booking->seats,
                 'status'    => $booking->status ?? 'confirmed',
                 'booked_at' => $booking->created_at->toIso8601String(),
                 'total_price' => $booking->seats * $ride->price_per_seat,

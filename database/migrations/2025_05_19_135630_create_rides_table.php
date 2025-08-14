@@ -40,7 +40,7 @@ return new class extends Migration
             $table->dateTime('departure_time');
             $table->unsignedSmallInteger('available_seats');
             $table->decimal('price_per_seat', 8, 2);
-            $table->string('vehicle_type', 50);
+            $table->string('vehicle_type', 50)->nullable();
             $table->text('notes')->nullable();
 
             // Indexes
