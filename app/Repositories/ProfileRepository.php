@@ -67,7 +67,7 @@ class ProfileRepository implements ProfileRepositoryInterface
             'full_name' => $user->first_name.' '.$user->last_name,
             'address' => $user->address,
             'gender' => $user->gender,
-            'profile_photo' => 'profiles/profile_photo/default-profile-photo.jpg', // Add this line
+            'profile_photo' => 'profiles/profile_photo/default-profile-photo.jpg', // Remove one .jpg if that's the issue
             'number_of_rides' => 0,
             'radio' => false,
             'smoking' => false
