@@ -88,7 +88,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{userId}/comments', [ProfileController::class, 'comment']);
         Route::post('/{userId}/rate', [ProfileController::class, 'rateUser']);
     });
-
+    Route::prefix('bookings')->group(function () {
+        Route::post('/{bookingId}/cancel-seats', [RideController::class, 'cancelPartialSeats']);
+    });
+    Route::get('/my-bookings', [RideController::class, 'getMyBookings']);
     // Ride routes
     Route::prefix('rides')->group(function () {
         Route::post('/', [RideController::class, 'createRide']);

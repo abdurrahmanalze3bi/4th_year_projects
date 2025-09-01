@@ -866,13 +866,16 @@ class RideController extends Controller
     public function getRideDetails(int $rideId)
     {
         try {
-            $ride = $this->rideRepository->getRideById($rideId);
+            // Load the ride with all necessary relationships
+            $ride = Ride::with([
+                'driver.profile',
+                'bookings.user.profile'
+            ])->findOrFail($rideId);
 
             return response()->json([
                 'success' => true,
                 'data'    => $this->formatRideDetailsResponse($ride),
             ], 200);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -882,20 +885,23 @@ class RideController extends Controller
     }
 
     /**
-     * Get user's rides (driver's rides)
+     * Get user's rides - Updated to load driver profiles
      */
     public function getRides(Request $request)
     {
         $user = $request->user();
 
         try {
-            $rides = $this->rideRepository->getDriverRides($user->id);
+            // Load rides with driver profiles
+            $rides = Ride::with('driver.profile')
+                ->where('driver_id', $user->id)
+                ->orderBy('created_at', 'desc')
+                ->get();
 
             return response()->json([
                 'success' => true,
                 'data'    => $rides->map(fn($ride) => $this->formatRideResponse($ride)),
             ], 200);
-
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -1108,12 +1114,19 @@ class RideController extends Controller
      */
     private function formatRideResponse($ride)
     {
+        // Load the driver's profile if not already loaded
+        if (!$ride->relationLoaded('driver.profile')) {
+            $ride->load('driver.profile');
+        }
+
         return [
             'id' => $ride->id,
             'driver' => [
                 'id'     => $ride->driver->id,
                 'name'   => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
-                'avatar' => $ride->driver->avatar,
+                'avatar' => $ride->driver->profile && $ride->driver->profile->profile_photo
+                    ? asset('storage/' . $ride->driver->profile->profile_photo)
+                    : $ride->driver->avatar,
                 'rating' => $ride->driver->driver_rating ?? 0,
             ],
             'pickup' => [
@@ -1145,7 +1158,7 @@ class RideController extends Controller
             ],
             'vehicle_type' => $ride->vehicle_type,
             'payment_method' => $ride->payment_method,
-            'booking_type' => $ride->booking_type, // New field
+            'booking_type' => $ride->booking_type,
             'notes' => $ride->notes,
             'created_at' => $ride->created_at->toIso8601String(),
             'chosen_route_index' => $ride->chosen_route_index,
@@ -1153,11 +1166,21 @@ class RideController extends Controller
             'communication_number' => $ride->communication_number,
         ];
     }
+
     /**
-     * Format ride details response
+     * Format ride details response - Updated to include driver profile photo
      */
     private function formatRideDetailsResponse($ride)
     {
+        // Load the driver's profile and bookings with users' profiles
+        if (!$ride->relationLoaded('driver.profile')) {
+            $ride->load('driver.profile');
+        }
+
+        if (!$ride->relationLoaded('bookings.user.profile')) {
+            $ride->load('bookings.user.profile');
+        }
+
         return array_merge($this->formatRideResponse($ride), [
             'route_geometry' => $ride->route_geometry,
             'bookings' => $ride->bookings->map(fn ($booking) => [
@@ -1165,7 +1188,9 @@ class RideController extends Controller
                 'user' => [
                     'id'   => $booking->user->id,
                     'name' => $booking->user->first_name . ' ' . $booking->user->last_name,
-                    'avatar' => $booking->user->avatar,
+                    'avatar' => $booking->user->profile && $booking->user->profile->profile_photo
+                        ? asset('storage/' . $booking->user->profile->profile_photo)
+                        : $booking->user->avatar,
                     'rating' => $booking->user->passenger_rating ?? 0,
                 ],
                 'seats' => (int) $booking->seats,
@@ -1175,6 +1200,7 @@ class RideController extends Controller
             ]),
         ]);
     }
+
 
     /**
      * Format booking response
@@ -1900,6 +1926,355 @@ class RideController extends Controller
             'driver_balance_after' => $driverWallet->balance
         ]);
     }
+    public function cancelPartialSeats(Request $request, int $bookingId)
+    {
+        $user = $request->user();
 
+        $validator = Validator::make($request->all(), [
+            'seats_to_cancel' => 'required|integer|min:1',
+        ]);
 
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            DB::beginTransaction();
+
+            // Get booking with ride and lock for update
+            $booking = Booking::with(['ride', 'user'])
+                ->lockForUpdate()
+                ->findOrFail($bookingId);
+
+            $ride = $booking->ride;
+            $seatsToCancel = $request->input('seats_to_cancel');
+
+            // Verify user owns this booking
+            if ($booking->user_id !== $user->id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'You can only cancel your own bookings'
+                ], 403);
+            }
+
+            // Check if booking can be cancelled (not completed, not already cancelled)
+            if (!in_array($booking->status, ['pending', 'confirmed'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This booking cannot be cancelled'
+                ], 400);
+            }
+
+            // Validate seats to cancel
+            if ($seatsToCancel > $booking->seats) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "Cannot cancel {$seatsToCancel} seats. You only have {$booking->seats} seats booked."
+                ], 400);
+            }
+
+            // Calculate refund amount
+            $refundPerSeat = $ride->price_per_seat;
+            $totalRefund = $seatsToCancel * $refundPerSeat;
+            $remainingSeats = $booking->seats - $seatsToCancel;
+
+            // Process refund for e-pay bookings
+            $refundProcessed = false;
+            if ($ride->payment_method === 'e-pay' && $booking->status === 'confirmed') {
+                $this->processPartialRefund($booking, $ride, $totalRefund, $seatsToCancel);
+                $refundProcessed = true;
+            }
+
+            if ($remainingSeats > 0) {
+                // Update booking with remaining seats
+                $booking->seats = $remainingSeats;
+                $booking->save();
+
+                $message = "Successfully cancelled {$seatsToCancel} seat(s). You still have {$remainingSeats} seat(s) booked.";
+            } else {
+                // Cancel entire booking
+                $booking->status = Booking::CANCELLED;
+                $booking->cancelled_at = now();
+                $booking->save();
+
+                $message = "Successfully cancelled all seats. Your booking has been cancelled.";
+            }
+
+            // Return seats to ride availability
+            $ride->increment('available_seats', $seatsToCancel);
+
+            // Update ride status if it was full
+            if ($ride->status === 'full') {
+                $ride->status = 'active';
+                $ride->save();
+            }
+
+            DB::commit();
+
+            // Send notifications
+            $this->sendPartialCancellationNotifications($booking, $ride, $seatsToCancel, $totalRefund, $refundProcessed);
+
+            Log::info('Partial seat cancellation successful', [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $user->id,
+                'seats_cancelled' => $seatsToCancel,
+                'remaining_seats' => $remainingSeats,
+                'refund_amount' => $totalRefund,
+                'refund_processed' => $refundProcessed
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => $message,
+                'data' => [
+                    'booking_id' => $booking->id,
+                    'seats_cancelled' => $seatsToCancel,
+                    'remaining_seats' => $remainingSeats,
+                    'refund_amount' => $refundProcessed ? $totalRefund : 0,
+                    'refund_processed' => $refundProcessed,
+                    'booking_status' => $booking->status,
+                ]
+            ], 200);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            Log::error('Partial seat cancellation failed', [
+                'booking_id' => $bookingId,
+                'passenger_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Cancellation failed: ' . $e->getMessage(),
+            ], 400);
+        }
+    }
+
+    /**
+     * Process partial refund for e-pay bookings using SyCash wallet
+     */
+    /**
+     * Process partial refund for e-pay bookings using primary admin wallet
+     */
+    /**
+     * Process partial refund for e-pay bookings using primary admin wallet
+     */
+    private function processPartialRefund($booking, $ride, $refundAmount, $seatsCancelled) {
+        // Get primary admin wallet (where the refunds come from)
+        $primaryAdminConfig = AdminDashboardController::ADMIN_CONFIGS['primary'];
+        $primaryAdminWallet = Wallet::where('phone_number', $primaryAdminConfig['phone'])
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Get passenger wallet
+        $passengerWallet = Wallet::where('user_id', $booking->user_id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Verify primary admin has sufficient balance for refund
+        if ($primaryAdminWallet->balance < $refundAmount) {
+            throw new \Exception('Insufficient primary admin wallet balance for refund processing');
+        }
+
+        // Process refund from primary admin to passenger
+        $adminPreviousBalance = $primaryAdminWallet->balance;
+        $primaryAdminWallet->balance -= $refundAmount;
+        $primaryAdminWallet->save();
+
+        $passengerPreviousBalance = $passengerWallet->balance;
+        $passengerWallet->balance += $refundAmount;
+        $passengerWallet->save();
+
+        // Create transaction records
+        $transactionId = 'PARTIAL_REFUND_' . time() . '_' . Str::random(6);
+
+        // Primary admin transaction (debit)
+        WalletTransaction::create([
+            'wallet_id' => $primaryAdminWallet->id,
+            'user_id' => $primaryAdminWallet->user_id,
+            'type' => 'partial_seat_refund',
+            'amount' => -$refundAmount,
+            'previous_balance' => $adminPreviousBalance,
+            'new_balance' => $primaryAdminWallet->balance,
+            'description' => "Partial refund for {$seatsCancelled} cancelled seat(s) to {$passengerWallet->user->first_name} {$passengerWallet->user->last_name}",
+            'transaction_id' => 'PRIMARY_ADM_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $booking->user_id,
+                'passenger_name' => "{$passengerWallet->user->first_name} {$passengerWallet->user->last_name}",
+                'seats_cancelled' => $seatsCancelled,
+                'refund_per_seat' => $ride->price_per_seat,
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'refund_source' => 'primary_admin_wallet'
+            ]
+        ]);
+
+        // Passenger transaction (credit)
+        WalletTransaction::create([
+            'wallet_id' => $passengerWallet->id,
+            'user_id' => $passengerWallet->user_id,
+            'type' => 'partial_seat_refund',
+            'amount' => $refundAmount,
+            'previous_balance' => $passengerPreviousBalance,
+            'new_balance' => $passengerWallet->balance,
+            'description' => "Refund for {$seatsCancelled} cancelled seat(s) from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'PASSENGER_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'seats_cancelled' => $seatsCancelled,
+                'refund_per_seat' => $ride->price_per_seat,
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'refund_source' => 'primary_admin_wallet'
+            ]
+        ]);
+
+        Log::info('Partial refund processed from primary admin wallet', [
+            'booking_id' => $booking->id,
+            'passenger_wallet_id' => $passengerWallet->id,
+            'admin_wallet_id' => $primaryAdminWallet->id,
+            'refund_amount' => $refundAmount,
+            'seats_cancelled' => $seatsCancelled,
+            'transaction_id' => $transactionId,
+            'admin_balance_after' => $primaryAdminWallet->balance,
+            'passenger_balance_after' => $passengerWallet->balance
+        ]);
+    }
+    private function sendPartialCancellationNotifications($booking, $ride, $seatsCancelled, $refundAmount, $refundProcessed)
+    {
+        $remainingSeats = $booking->seats;
+        $passenger = $booking->user;
+        $driver = $ride->driver;
+
+        // Notify passenger
+        $passengerMessage = $remainingSeats > 0
+            ? "You've cancelled {$seatsCancelled} seat(s). You still have {$remainingSeats} seat(s) booked."
+            : "You've cancelled your booking completely.";
+
+        if ($refundProcessed) {
+            $passengerMessage .= " Refund of $" . number_format($refundAmount, 2) . " has been processed.";
+        }
+
+        $this->notificationService->createNotification(
+            $passenger,
+            'partial_seat_cancellation',
+            'Seats Cancelled',
+            $passengerMessage,
+            [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'seats_cancelled' => $seatsCancelled,
+                'remaining_seats' => $remainingSeats,
+                'refund_amount' => $refundProcessed ? $refundAmount : 0,
+            ],
+            'normal',
+            'ride'
+        );
+
+        // Notify driver
+        $driverMessage = $remainingSeats > 0
+            ? "{$passenger->first_name} {$passenger->last_name} cancelled {$seatsCancelled} seat(s) but still has {$remainingSeats} seat(s) booked."
+            : "{$passenger->first_name} {$passenger->last_name} cancelled their entire booking.";
+
+        $this->notificationService->createNotification(
+            $driver,
+            'passenger_partial_cancellation',
+            'Passenger Cancelled Seats',
+            $driverMessage . " {$seatsCancelled} seat(s) are now available again.",
+            [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $passenger->id,
+                'passenger_name' => "{$passenger->first_name} {$passenger->last_name}",
+                'seats_cancelled' => $seatsCancelled,
+                'remaining_seats' => $remainingSeats,
+                'seats_now_available' => $ride->available_seats,
+            ],
+            'normal',
+            'ride'
+        );
+    }
+    public function getMyBookings(Request $request)
+    {
+        $user = $request->user();
+
+        if (!$user->is_verified_passenger) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You must be verified as a passenger to view bookings.'
+            ], 403);
+        }
+
+        try {
+            // Get all bookings for this passenger, sorted by departure time (newest first)
+            $bookings = Booking::with([
+                'ride.driver.profile'
+            ])
+                ->where('user_id', $user->id)
+                ->join('rides', 'bookings.ride_id', '=', 'rides.id')
+                ->orderBy('rides.departure_time', 'desc')
+                ->select('bookings.*')
+                ->get();
+
+            return response()->json([
+                'success' => true,
+                'data' => $bookings->map(function ($booking) {
+                    $ride = $booking->ride;
+                    return [
+                        'booking_id' => $booking->id,
+                        'status' => $booking->status,
+                        'seats' => $booking->seats,
+                        'total_price' => $booking->seats * $ride->price_per_seat,
+                        'booking_date' => $booking->created_at->toIso8601String(),
+
+                        // Communication numbers - clearly labeled
+                        'passenger_communication_number' => $booking->communication_number,
+                        'driver_communication_number' => $ride->communication_number,
+
+                        // Ride details
+                        'ride_id' => $ride->id,
+                        'pickup_address' => $ride->pickup_address,
+                        'destination_address' => $ride->destination_address,
+                        'departure_time' => $ride->departure_time->toIso8601String(),
+                        'distance_km' => round($ride->distance / 1000, 1),
+                        'duration_minutes' => round($ride->duration / 60),
+                        'price_per_seat' => $ride->price_per_seat,
+                        'payment_method' => $ride->payment_method,
+                        'vehicle_type' => $ride->vehicle_type,
+                        'ride_status' => $ride->status,
+
+                        // Driver details
+                        'driver_name' => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
+                        'driver_rating' => $ride->driver->driver_rating ?? 0,
+                        'driver_avatar' => $ride->driver->profile && $ride->driver->profile->profile_photo
+                            ? asset('storage/' . $ride->driver->profile->profile_photo)
+                            : $ride->driver->avatar,
+                    ];
+                })
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Failed to fetch passenger bookings', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch bookings: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
 }

@@ -331,7 +331,7 @@ class RideRepository implements RideRepositoryInterface
         return $query->with('driver')->get();
     }
 
-// RideController.php - notifyRideFull method (updated)
+    // RideController.php - notifyRideFull method (updated)
     private function notifyRideFull($ride)
     {
         try {
@@ -385,12 +385,13 @@ class RideRepository implements RideRepositoryInterface
 
     private function applySpatialFilters(EloquentBuilder $query, array $params)
     {
-        $maxDistance = 3 * 1000;
+        // UPDATED: Changed from 3km to 20km
+        $maxDistance = 20 * 1000; // 20 kilometers in meters
         $srcWkt = sprintf('POINT(%F %F)', $params['source_lng'], $params['source_lat']);
         $dstWkt = sprintf('POINT(%F %F)', $params['dest_lng'], $params['dest_lat']);
 
         $query->where(function ($q) use ($maxDistance, $srcWkt, $dstWkt) {
-            // Case A: endpoints within 3 km
+            // Case A: endpoints within 20 km
             $q->whereRaw(
                 "ST_Distance_Sphere(pickup_location, ST_GeomFromText(?, 4326)) <= ?",
                 [$srcWkt, $maxDistance]
@@ -408,11 +409,12 @@ class RideRepository implements RideRepositoryInterface
                         // Additional check to ensure coordinates array exists
                         ->whereRaw("JSON_EXTRACT(route_geometry, '$.coordinates') IS NOT NULL")
                         ->whereRaw("JSON_TYPE(JSON_EXTRACT(route_geometry, '$.coordinates')) = 'ARRAY'")
+                        // UPDATED: Increased buffer from 0.01 to 0.05 degrees for 20km search (roughly 5km buffer around route)
                         ->whereRaw(
                             "ST_Contains(
                             ST_Buffer(
                                 ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
-                                0.01
+                                0.05
                             ),
                             ST_GeomFromText(?, 4326)
                         )",
@@ -422,7 +424,7 @@ class RideRepository implements RideRepositoryInterface
                             "ST_Contains(
                             ST_Buffer(
                                 ST_GeomFromGeoJSON(JSON_UNQUOTE(route_geometry)),
-                                0.01
+                                0.05
                             ),
                             ST_GeomFromText(?, 4326)
                         )",
