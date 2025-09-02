@@ -14,6 +14,7 @@ use App\Events\RideBooked;
 use App\Events\RideCancelled;
 use App\Events\RideCreated;
 use App\Models\User;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
@@ -324,9 +325,14 @@ class RideController extends Controller
     /**
      * Create a ride with a pre-selected route (supports addresses or coordinates)
      */
+    /**
+     * Create a ride with a pre-selected route (supports addresses or coordinates)
+     */
     public function createRideWithRoute(Request $request)
     {
         $user = $request->user();
+
+        // Verify driver status
         if (!$user->is_verified_driver) {
             return response()->json([
                 'success' => false,
@@ -336,6 +342,7 @@ class RideController extends Controller
 
         $this->validateDriverProfile($user);
 
+        // Input validation
         $validator = Validator::make($request->all(), [
             'pickup_address'       => 'required_without_all:pickup_lat,pickup_lng|string|max:255',
             'pickup_lat'           => 'required_with:pickup_lng|numeric',
@@ -344,9 +351,24 @@ class RideController extends Controller
             'destination_lat'      => 'required_with:destination_lng|numeric',
             'destination_lng'      => 'required_with:destination_lat|numeric',
             'route_index'          => 'required|integer|min:0',
-            'departure_time'       => 'required|date|after:now',
-            'available_seats'      => 'required|integer|min:1',
-            'price_per_seat'       => 'required|numeric|min:0',
+            'departure_time'       => [
+                'required',
+                'date',
+                function ($attribute, $value, $fail) {
+                    try {
+                        $inputTime = Carbon::parse($value, 'Asia/Damascus');
+                        $now = Carbon::now('Asia/Damascus');
+
+                        if ($inputTime->lte($now->addMinutes(5))) {
+                            $fail('Departure time must be at least 5 minutes in the future (Syria time).');
+                        }
+                    } catch (\Exception $e) {
+                        $fail('Invalid date format.');
+                    }
+                }
+            ],
+            'available_seats'      => 'required|integer|min:1|max:8',
+            'price_per_seat'       => 'required|numeric|min:100|max:100000',
             'payment_method'       => 'required|in:cash,e-pay',
             'communication_number' => 'required|regex:/^09\d{8}$/',
             'booking_type'         => 'required|in:direct,request',
@@ -356,87 +378,57 @@ class RideController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors'  => $validator->errors(),
+                'errors' => $validator->errors(),
             ], 422);
         }
 
         try {
             DB::beginTransaction();
 
-            // Calculate required fee
-            $totalRidePrice = $request->price_per_seat * $request->available_seats;
-            $requiredFee = ($totalRidePrice) * 0.05;
+            // Parse departure time (assuming Syria timezone)
+            $departureTime = Carbon::parse($request->departure_time);
 
-            // Get driver's wallet
+            Log::info('Creating ride with departure time', [
+                'driver_id' => $user->id,
+                'input_departure_time' => $request->departure_time,
+                'parsed_departure_time' => $departureTime->toDateTimeString(),
+            ]);
+
+            // Calculate ride creation fee (5% of total ride value)
+            $totalRidePrice = $request->price_per_seat * $request->available_seats;
+            $requiredFee = $totalRidePrice * 0.05;
+
+            // Get and lock driver wallet
             $driverWallet = Wallet::where('user_id', $user->id)
                 ->lockForUpdate()
-                ->firstOrFail();
+                ->first();
 
-            // Verify sufficient balance
+            if (!$driverWallet) {
+                throw new \Exception('Driver wallet not found. Please create a wallet first.');
+            }
+
+            // Verify sufficient balance for fee
             if ($driverWallet->balance < $requiredFee) {
                 throw new \Exception(
-                    'Insufficient wallet balance. Required fee: ' .
-                    number_format($requiredFee, 2) . '. Current balance: ' .
-                    number_format($driverWallet->balance, 2)
+                    sprintf(
+                        'Insufficient wallet balance. Required fee: %s SYP. Current balance: %s SYP.',
+                        number_format($requiredFee, 0),
+                        number_format($driverWallet->balance, 0)
+                    )
                 );
             }
 
-            // Get SyCash wallet
+            // Get and lock SyCash admin wallet
             $syCashConfig = AdminDashboardController::ADMIN_CONFIGS['sycash'];
             $syCashWallet = Wallet::where('phone_number', $syCashConfig['phone'])
                 ->lockForUpdate()
-                ->firstOrFail();
+                ->first();
 
-            // Transfer funds
-            $driverPreviousBalance = $driverWallet->balance;
-            $driverWallet->balance -= $requiredFee;
-            $driverWallet->save();
+            if (!$syCashWallet) {
+                throw new \Exception('SyCash system wallet not found. Please contact support.');
+            }
 
-            $syCashPreviousBalance = $syCashWallet->balance;
-            $syCashWallet->balance += $requiredFee;
-            $syCashWallet->save();
-
-            // Record transactions
-            $transactionId = 'RIDE_FEE_' . time() . '_' . Str::random(6);
-            WalletTransaction::create([
-                'wallet_id' => $driverWallet->id,
-                'user_id' => $user->id,
-                'type' => 'ride_creation_fee',
-                'amount' => -$requiredFee,
-                'previous_balance' => $driverPreviousBalance,
-                'new_balance' => $driverWallet->balance,
-                'description' => 'Ride creation fee deduction',
-                'transaction_id' => $transactionId,
-                'status' => 'completed',
-                'metadata' => [
-                    'ride_type' => 'pre_routed',
-                    'booking_type' => $request->booking_type,
-                    'total_ride_price' => $totalRidePrice,
-                    'calculation' => '5% of (4 x ' . $totalRidePrice . ')',
-                    'payment_method' => $request->payment_method
-                ]
-            ]);
-
-            WalletTransaction::create([
-                'wallet_id' => $syCashWallet->id,
-                'user_id' => $syCashWallet->user_id,
-                'type' => 'ride_creation_fee',
-                'amount' => $requiredFee,
-                'previous_balance' => $syCashPreviousBalance,
-                'new_balance' => $syCashWallet->balance,
-                'description' => 'Ride creation fee from driver: ' . $user->email,
-                'transaction_id' => 'SYCA_' . $transactionId,
-                'status' => 'completed',
-                'metadata' => [
-                    'driver_id' => $user->id,
-                    'booking_type' => $request->booking_type,
-                    'driver_name' => $user->first_name . ' ' . $user->last_name,
-                    'fee_calculation' => '5% of (4 x ' . $totalRidePrice . ')',
-                    'payment_method' => $request->payment_method
-                ]
-            ]);
-
-            // Geocode addresses if needed
+            // Process location data
             if ($request->filled('pickup_address')) {
                 $pickup = $this->geo->geocodeAddress($request->pickup_address);
                 $pickupAddress = $request->pickup_address;
@@ -459,16 +451,87 @@ class RideController extends Controller
                 $destinationAddress = $this->geo->reverseGeocode($destination['lat'], $destination['lng']);
             }
 
-            // Get route options
+            // Get route options and validate selection
             $routeOptions = $this->geo->getRouteAlternatives($pickup, $destination, 3);
+
             if ($request->route_index >= count($routeOptions)) {
-                throw new \Exception('Invalid route selection. Maximum index is ' . (count($routeOptions) - 1));
+                throw new \Exception(sprintf(
+                    'Invalid route selection. Available routes: 0-%d. Selected: %d',
+                    count($routeOptions) - 1,
+                    $request->route_index
+                ));
             }
 
             $chosenRoute = $routeOptions[$request->route_index];
 
+            // Process wallet transactions for ride creation fee
+            $driverPreviousBalance = $driverWallet->balance;
+            $driverWallet->balance -= $requiredFee;
+            $driverWallet->save();
+
+            $syCashPreviousBalance = $syCashWallet->balance;
+            $syCashWallet->balance += $requiredFee;
+            $syCashWallet->save();
+
+            // Create transaction records
+            $transactionId = 'RIDE_FEE_' . time() . '_' . Str::random(6);
+
+            // Driver transaction (debit)
+            WalletTransaction::create([
+                'wallet_id' => $driverWallet->id,
+                'user_id' => $user->id,
+                'type' => 'ride_creation_fee',
+                'amount' => -$requiredFee,
+                'previous_balance' => $driverPreviousBalance,
+                'new_balance' => $driverWallet->balance,
+                'description' => sprintf(
+                    'Ride creation fee: %s to %s (Route %d)',
+                    $pickupAddress,
+                    $destinationAddress,
+                    $request->route_index + 1
+                ),
+                'transaction_id' => $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'ride_type' => 'pre_routed',
+                    'booking_type' => $request->booking_type,
+                    'total_ride_price' => $totalRidePrice,
+                    'fee_percentage' => 5,
+                    'payment_method' => $request->payment_method,
+                    'route_index' => $request->route_index,
+                    'distance_km' => round($chosenRoute['distance'] / 1000, 2),
+                    'duration_minutes' => round($chosenRoute['duration'] / 60)
+                ]
+            ]);
+
+            // SyCash transaction (credit)
+            WalletTransaction::create([
+                'wallet_id' => $syCashWallet->id,
+                'user_id' => $syCashWallet->user_id,
+                'type' => 'ride_creation_fee',
+                'amount' => $requiredFee,
+                'previous_balance' => $syCashPreviousBalance,
+                'new_balance' => $syCashWallet->balance,
+                'description' => sprintf(
+                    'Ride creation fee from %s %s',
+                    $user->first_name,
+                    $user->last_name
+                ),
+                'transaction_id' => 'SYCA_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'driver_id' => $user->id,
+                    'driver_name' => $user->first_name . ' ' . $user->last_name,
+                    'driver_email' => $user->email,
+                    'fee_percentage' => 5,
+                    'total_ride_price' => $totalRidePrice,
+                    'booking_type' => $request->booking_type,
+                    'payment_method' => $request->payment_method
+                ]
+            ]);
+
             // Prepare ride data
-            $data = [
+            $rideData = [
                 'driver_id' => $user->id,
                 'pickup_address' => $pickupAddress,
                 'destination_address' => $destinationAddress,
@@ -484,32 +547,69 @@ class RideController extends Controller
                 'duration' => $chosenRoute['duration'],
                 'route_geometry' => $chosenRoute['geometry'],
                 'chosen_route_index' => $request->route_index,
-                'departure_time' => $request->departure_time,
+                'departure_time' => $departureTime->toDateTimeString(),
                 'available_seats' => $request->available_seats,
                 'price_per_seat' => $request->price_per_seat,
-                'vehicle_type' => $user->profile->type_of_car,
-                'communication_number' => $request->input('communication_number'),
-                'payment_method' => $request->input('payment_method'),
-                'booking_type' => $request->input('booking_type'), // New field
+                'vehicle_type' => $user->profile->type_of_car ?? 'Not specified',
+                'communication_number' => $request->communication_number,
+                'payment_method' => $request->payment_method,
+                'booking_type' => $request->booking_type,
                 'notes' => $request->notes,
             ];
 
-            // Create ride
-            $ride = $this->rideRepository->createRideWithGeometry($data);
+            // Create the ride
+            $ride = $this->rideRepository->createRideWithGeometry($rideData);
+
+            // Update driver's ride count
             $user->profile->increment('number_of_rides');
 
-            // Notify nearby passengers
+            // Send notifications to nearby passengers
             $this->notifyNearbyPassengers($ride, $pickup, $destination);
+
+            // Create success notification for driver
+            $this->notificationService->createNotification(
+                $user,
+                'ride_created_success',
+                'Ride Created Successfully',
+                sprintf(
+                    'Your ride from %s to %s has been created and is available for booking. Departure: %s',
+                    $pickupAddress,
+                    $destinationAddress,
+                    $departureTime->format('M j, Y \a\t g:i A')
+                ),
+                [
+                    'ride_id' => $ride->id,
+                    'pickup_address' => $pickupAddress,
+                    'destination_address' => $destinationAddress,
+                    'departure_time' => $departureTime->toISOString(),
+                    'payment_method' => $request->payment_method,
+                    'booking_type' => $request->booking_type,
+                    'fee_deducted' => $requiredFee,
+                    'distance_km' => round($chosenRoute['distance'] / 1000, 1),
+                    'duration_minutes' => round($chosenRoute['duration'] / 60)
+                ],
+                'normal',
+                'ride'
+            );
+
+            // Broadcast ride creation event
             broadcast(new RideCreated($ride));
 
             DB::commit();
 
-            Log::info('Ride created with route successfully', [
+            Log::info('Ride with route created successfully', [
                 'ride_id' => $ride->id,
                 'driver_id' => $user->id,
+                'pickup' => $pickupAddress,
+                'destination' => $destinationAddress,
+                'departure_syria_time' => $departureTime->toDateTimeString(),
+                'route_index' => $request->route_index,
+                'distance_km' => round($chosenRoute['distance'] / 1000, 1),
+                'duration_minutes' => round($chosenRoute['duration'] / 60),
                 'fee_deducted' => $requiredFee,
                 'payment_method' => $request->payment_method,
-                'booking_type' => $request->booking_type
+                'booking_type' => $request->booking_type,
+                'driver_new_balance' => $driverWallet->balance
             ]);
 
             return response()->json([
@@ -520,11 +620,12 @@ class RideController extends Controller
 
         } catch (\Exception $e) {
             DB::rollBack();
+
             Log::error('Ride creation with route failed', [
                 'driver_id' => $user->id,
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
-                'request' => $request->all()
+                'request_data' => $request->except(['password'])
             ]);
 
             return response()->json([
@@ -1837,23 +1938,76 @@ class RideController extends Controller
         $user = $request->user();
 
         return DB::transaction(function () use ($user, $bookingId) {
-            $booking = Booking::with('ride')->lockForUpdate()->findOrFail($bookingId);
+            $booking = Booking::with(['ride', 'user'])->lockForUpdate()->findOrFail($bookingId);
             $ride = $booking->ride;
 
-            if ($booking->user_id !== $user->id) abort(403);
+            if ($booking->user_id !== $user->id) {
+                abort(403, 'You can only cancel your own bookings');
+            }
 
             if (!$booking->canBeCancelled()) {
                 abort(400, 'Booking cannot be cancelled');
             }
 
+            // Calculate refund based on time elapsed
+            $refundInfo = $this->calculateRefundPercentage($ride->departure_time, $booking->created_at);
+
+            $totalSeats = $booking->seats;
+            $fullPriceTotal = $totalSeats * $ride->price_per_seat;
+            $refundAmount = ($fullPriceTotal * $refundInfo['refund_percentage']) / 100;
+            $nonRefundableAmount = $fullPriceTotal - $refundAmount;
+
+            // Process refund for e-pay bookings if there's a refund amount
+            // Process fund redistribution for e-pay bookings (refund + driver payout)
+            $refundProcessed = false;
+            if ($ride->payment_method === 'e-pay' && $booking->status === 'confirmed') {
+                $this->processTimeBasedRefund($booking, $ride, $refundAmount, $totalSeats, $refundInfo);
+                $refundProcessed = true;
+            }
+
             $booking->status = Booking::CANCELLED;
+            $booking->cancelled_at = now();
             $booking->save();
 
-            $ride->increment('available_seats', $booking->seats);
+            $ride->increment('available_seats', $totalSeats);
+
+            // Update ride status if it was full
+            if ($ride->status === 'full') {
+                $ride->status = 'active';
+                $ride->save();
+            }
+
+            // Send notifications
+            $this->sendTimeBasedCancellationNotifications($booking, $ride, $totalSeats, $refundAmount, $refundProcessed, $refundInfo);
+
+            Log::info('Full booking cancellation with time-based refund', [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $user->id,
+                'seats_cancelled' => $totalSeats,
+                'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                'refund_percentage' => $refundInfo['refund_percentage'],
+                'refund_amount' => $refundAmount,
+                'non_refundable_amount' => $nonRefundableAmount
+            ]);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Seat cancelled successfully'
+                'message' => 'Booking cancelled successfully',
+                'data' => [
+                    'booking_id' => $booking->id,
+                    'seats_cancelled' => $totalSeats,
+                    'refund_policy' => [
+                        'time_elapsed_percentage' => round($refundInfo['time_elapsed_percentage'], 2),
+                        'refund_percentage' => $refundInfo['refund_percentage'],
+                        'policy_tier' => $refundInfo['policy_tier'],
+                        'total_seat_price' => $fullPriceTotal,
+                        'refund_amount' => $refundAmount,
+                        'non_refundable_amount' => $nonRefundableAmount,
+                        'refund_processed' => $refundProcessed
+                    ],
+                    'booking_status' => $booking->status
+                ]
             ]);
         });
     }
@@ -1960,7 +2114,7 @@ class RideController extends Controller
                 ], 403);
             }
 
-            // Check if booking can be cancelled (not completed, not already cancelled)
+            // Check if booking can be cancelled
             if (!in_array($booking->status, ['pending', 'confirmed'])) {
                 return response()->json([
                     'success' => false,
@@ -1976,15 +2130,21 @@ class RideController extends Controller
                 ], 400);
             }
 
-            // Calculate refund amount
-            $refundPerSeat = $ride->price_per_seat;
-            $totalRefund = $seatsToCancel * $refundPerSeat;
+            // Calculate refund based on time elapsed
+            $refundInfo = $this->calculateRefundPercentage($ride->departure_time, $booking->created_at);
+
+            $fullPricePerSeat = $ride->price_per_seat;
+            $totalFullPrice = $seatsToCancel * $fullPricePerSeat;
+            $refundAmount = ($totalFullPrice * $refundInfo['refund_percentage']) / 100;
+            $nonRefundableAmount = $totalFullPrice - $refundAmount;
+
             $remainingSeats = $booking->seats - $seatsToCancel;
 
-            // Process refund for e-pay bookings
+            // Process refund for e-pay bookings if there's a refund amount
+            // Process fund redistribution for e-pay bookings (refund + driver payout)
             $refundProcessed = false;
             if ($ride->payment_method === 'e-pay' && $booking->status === 'confirmed') {
-                $this->processPartialRefund($booking, $ride, $totalRefund, $seatsToCancel);
+                $this->processTimeBasedRefund($booking, $ride, $refundAmount, $seatsToCancel, $refundInfo);
                 $refundProcessed = true;
             }
 
@@ -1992,14 +2152,12 @@ class RideController extends Controller
                 // Update booking with remaining seats
                 $booking->seats = $remainingSeats;
                 $booking->save();
-
                 $message = "Successfully cancelled {$seatsToCancel} seat(s). You still have {$remainingSeats} seat(s) booked.";
             } else {
                 // Cancel entire booking
                 $booking->status = Booking::CANCELLED;
                 $booking->cancelled_at = now();
                 $booking->save();
-
                 $message = "Successfully cancelled all seats. Your booking has been cancelled.";
             }
 
@@ -2015,16 +2173,18 @@ class RideController extends Controller
             DB::commit();
 
             // Send notifications
-            $this->sendPartialCancellationNotifications($booking, $ride, $seatsToCancel, $totalRefund, $refundProcessed);
+            $this->sendTimeBasedCancellationNotifications($booking, $ride, $seatsToCancel, $refundAmount, $refundProcessed, $refundInfo);
 
-            Log::info('Partial seat cancellation successful', [
+            Log::info('Time-based cancellation successful', [
                 'booking_id' => $booking->id,
                 'ride_id' => $ride->id,
                 'passenger_id' => $user->id,
                 'seats_cancelled' => $seatsToCancel,
-                'remaining_seats' => $remainingSeats,
-                'refund_amount' => $totalRefund,
-                'refund_processed' => $refundProcessed
+                'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                'refund_percentage' => $refundInfo['refund_percentage'],
+                'refund_amount' => $refundAmount,
+                'non_refundable_amount' => $nonRefundableAmount,
+                'policy_tier' => $refundInfo['policy_tier']
             ]);
 
             return response()->json([
@@ -2034,8 +2194,15 @@ class RideController extends Controller
                     'booking_id' => $booking->id,
                     'seats_cancelled' => $seatsToCancel,
                     'remaining_seats' => $remainingSeats,
-                    'refund_amount' => $refundProcessed ? $totalRefund : 0,
-                    'refund_processed' => $refundProcessed,
+                    'refund_policy' => [
+                        'time_elapsed_percentage' => round($refundInfo['time_elapsed_percentage'], 2),
+                        'refund_percentage' => $refundInfo['refund_percentage'],
+                        'policy_tier' => $refundInfo['policy_tier'],
+                        'total_seat_price' => $totalFullPrice,
+                        'refund_amount' => $refundAmount,
+                        'non_refundable_amount' => $nonRefundableAmount,
+                        'refund_processed' => $refundProcessed
+                    ],
                     'booking_status' => $booking->status,
                 ]
             ], 200);
@@ -2043,7 +2210,7 @@ class RideController extends Controller
         } catch (\Exception $e) {
             DB::rollBack();
 
-            Log::error('Partial seat cancellation failed', [
+            Log::error('Time-based cancellation failed', [
                 'booking_id' => $bookingId,
                 'passenger_id' => $user->id,
                 'error' => $e->getMessage(),
@@ -2206,8 +2373,7 @@ class RideController extends Controller
             'ride'
         );
     }
-    public function getMyBookings(Request $request)
-    {
+    public function getMyBookings(Request $request) {
         $user = $request->user();
 
         if (!$user->is_verified_passenger) {
@@ -2255,7 +2421,8 @@ class RideController extends Controller
                         'vehicle_type' => $ride->vehicle_type,
                         'ride_status' => $ride->status,
 
-                        // Driver details
+                        // Driver details - INCLUDING driver_id
+                        'driver_id' => $ride->driver_id, // Added this line
                         'driver_name' => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
                         'driver_rating' => $ride->driver->driver_rating ?? 0,
                         'driver_avatar' => $ride->driver->profile && $ride->driver->profile->profile_photo
@@ -2276,5 +2443,370 @@ class RideController extends Controller
                 'message' => 'Failed to fetch bookings: ' . $e->getMessage(),
             ], 500);
         }
+    }
+    private function calculateRefundPercentage($departureTime, $bookingCreatedAt = null)
+    {
+        $now = now();
+        $departure = Carbon::parse($departureTime);
+
+        // If departure time has already passed, no refund
+        if ($now->greaterThanOrEqualTo($departure)) {
+            return [
+                'refund_percentage' => 0,
+                'time_elapsed_percentage' => 100,
+                'policy_tier' => 'No refund - departure time passed'
+            ];
+        }
+
+        // Use actual booking creation time if available, otherwise use current time
+        $bookingTime = $bookingCreatedAt ? Carbon::parse($bookingCreatedAt) : $now;
+
+        // Calculate total time from booking to departure
+        $totalTimeFromBooking = $bookingTime->diffInMinutes($departure);
+
+        // Calculate elapsed time since booking
+        $timeElapsedSinceBooking = $bookingTime->diffInMinutes($now);
+
+        // Calculate percentage of time elapsed
+        $timeElapsedPercentage = $totalTimeFromBooking > 0
+            ? min(100, ($timeElapsedSinceBooking / $totalTimeFromBooking) * 100)
+            : 100;
+
+        // Apply refund policy based on time elapsed percentage
+        if ($timeElapsedPercentage <= 30) {
+            return [
+                'refund_percentage' => 100,
+                'time_elapsed_percentage' => $timeElapsedPercentage,
+                'policy_tier' => 'Full refund (0-30% time elapsed)',
+                'total_minutes_from_booking' => $totalTimeFromBooking,
+                'minutes_elapsed' => $timeElapsedSinceBooking
+            ];
+        } elseif ($timeElapsedPercentage <= 50) {
+            return [
+                'refund_percentage' => 70,
+                'time_elapsed_percentage' => $timeElapsedPercentage,
+                'policy_tier' => 'Partial refund (30-50% time elapsed)',
+                'total_minutes_from_booking' => $totalTimeFromBooking,
+                'minutes_elapsed' => $timeElapsedSinceBooking
+            ];
+        } elseif ($timeElapsedPercentage <= 70) {
+            return [
+                'refund_percentage' => 50,
+                'time_elapsed_percentage' => $timeElapsedPercentage,
+                'policy_tier' => 'Partial refund (50-70% time elapsed)',
+                'total_minutes_from_booking' => $totalTimeFromBooking,
+                'minutes_elapsed' => $timeElapsedSinceBooking
+            ];
+        } else {
+            return [
+                'refund_percentage' => 0,
+                'time_elapsed_percentage' => $timeElapsedPercentage,
+                'policy_tier' => 'No refund (70-100% time elapsed)',
+                'total_minutes_from_booking' => $totalTimeFromBooking,
+                'minutes_elapsed' => $timeElapsedSinceBooking
+            ];
+        }
+    }
+    private function processTimeBasedRefund($booking, $ride, $refundAmount, $seatsCancelled, $refundInfo) {
+        // Get primary admin wallet (where passenger payments are held)
+        $primaryAdminConfig = AdminDashboardController::ADMIN_CONFIGS['primary'];
+        $primaryAdminWallet = Wallet::where('phone_number', $primaryAdminConfig['phone'])
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Get passenger wallet
+        $passengerWallet = Wallet::where('user_id', $booking->user_id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Get driver wallet
+        $driverWallet = Wallet::where('user_id', $ride->driver_id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Calculate amounts
+        $totalPaid = $seatsCancelled * $ride->price_per_seat;
+        $nonRefundableAmount = $totalPaid - $refundAmount;
+
+        // Verify admin has sufficient balance for the total transaction
+        if ($primaryAdminWallet->balance < $totalPaid) {
+            throw new \Exception('Insufficient admin wallet balance for processing cancellation');
+        }
+
+        // Store initial balances
+        $adminPreviousBalance = $primaryAdminWallet->balance;
+        $passengerPreviousBalance = $passengerWallet->balance;
+        $driverPreviousBalance = $driverWallet->balance;
+
+        // Process the fund redistribution
+        $primaryAdminWallet->balance -= $totalPaid; // Remove total amount from admin
+
+        // Add refund to passenger if any
+        if ($refundAmount > 0) {
+            $passengerWallet->balance += $refundAmount;
+        }
+
+        // Add non-refundable amount to driver (ALWAYS if nonRefundableAmount > 0)
+        if ($nonRefundableAmount > 0) {
+            $driverWallet->balance += $nonRefundableAmount;
+        }
+
+        // Save all wallets
+        $primaryAdminWallet->save();
+        $passengerWallet->save();
+        $driverWallet->save();
+
+        // Create transaction records
+        $transactionId = 'TIME_CANCEL_' . time() . '_' . Str::random(6);
+
+        // 1. Admin wallet transaction (total deduction) - ALWAYS CREATE
+        WalletTransaction::create([
+            'wallet_id' => $primaryAdminWallet->id,
+            'user_id' => $primaryAdminWallet->user_id,
+            'type' => 'cancellation_processing',
+            'amount' => -$totalPaid,
+            'previous_balance' => $adminPreviousBalance,
+            'new_balance' => $primaryAdminWallet->balance,
+            'description' => "Processing cancellation: {$seatsCancelled} seat(s) - Refund: $" . number_format($refundAmount, 2) . ", Driver payout: $" . number_format($nonRefundableAmount, 2),
+            'transaction_id' => 'ADMIN_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $booking->user_id,
+                'driver_id' => $ride->driver_id,
+                'seats_cancelled' => $seatsCancelled,
+                'total_paid' => $totalPaid,
+                'refund_amount' => $refundAmount,
+                'driver_payout' => $nonRefundableAmount,
+                'refund_percentage' => $refundInfo['refund_percentage'],
+                'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                'policy_tier' => $refundInfo['policy_tier']
+            ]
+        ]);
+
+        // 2. Passenger refund transaction (ONLY if refund > 0)
+        if ($refundAmount > 0) {
+            WalletTransaction::create([
+                'wallet_id' => $passengerWallet->id,
+                'user_id' => $passengerWallet->user_id,
+                'type' => 'time_based_refund',
+                'amount' => $refundAmount,
+                'previous_balance' => $passengerPreviousBalance,
+                'new_balance' => $passengerWallet->balance,
+                'description' => "Refund ({$refundInfo['refund_percentage']}%) for {$seatsCancelled} cancelled seat(s) - {$refundInfo['policy_tier']}",
+                'transaction_id' => 'REFUND_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'booking_id' => $booking->id,
+                    'ride_id' => $ride->id,
+                    'seats_cancelled' => $seatsCancelled,
+                    'refund_percentage' => $refundInfo['refund_percentage'],
+                    'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                    'policy_tier' => $refundInfo['policy_tier'],
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address
+                ]
+            ]);
+        }
+
+        // 3. Driver payout transaction (ALWAYS CREATE if nonRefundableAmount > 0)
+        // FIXED: This will now work for 0% refund cases (70%+ time elapsed)
+        if ($nonRefundableAmount > 0) {
+            WalletTransaction::create([
+                'wallet_id' => $driverWallet->id,
+                'user_id' => $driverWallet->user_id,
+                'type' => 'cancellation_fee_earnings',
+                'amount' => $nonRefundableAmount,
+                'previous_balance' => $driverPreviousBalance,
+                'new_balance' => $driverWallet->balance,
+                'description' => "Cancellation earnings - {$seatsCancelled} seat(s) ({$refundInfo['policy_tier']})",
+                'transaction_id' => 'DRIVER_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'booking_id' => $booking->id,
+                    'ride_id' => $ride->id,
+                    'passenger_id' => $booking->user_id,
+                    'passenger_name' => "{$passengerWallet->user->first_name} {$passengerWallet->user->last_name}",
+                    'seats_cancelled' => $seatsCancelled,
+                    'total_paid' => $totalPaid,
+                    'refund_percentage' => $refundInfo['refund_percentage'],
+                    'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                    'policy_tier' => $refundInfo['policy_tier'],
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address
+                ]
+            ]);
+        }
+
+        // 4. SPECIAL CASE: If no refund (0%) but total was paid (100% to driver)
+        // Create a specific transaction for the passenger showing 0 refund
+        if ($refundAmount == 0 && $totalPaid > 0) {
+            WalletTransaction::create([
+                'wallet_id' => $passengerWallet->id,
+                'user_id' => $passengerWallet->user_id,
+                'type' => 'cancellation_no_refund',
+                'amount' => 0, // No money movement, just for record
+                'previous_balance' => $passengerPreviousBalance,
+                'new_balance' => $passengerWallet->balance, // Should be same as previous
+                'description' => "No refund due to late cancellation - {$seatsCancelled} seat(s) forfeited ({$refundInfo['policy_tier']})",
+                'transaction_id' => 'NO_REFUND_' . $transactionId,
+                'status' => 'completed',
+                'metadata' => [
+                    'booking_id' => $booking->id,
+                    'ride_id' => $ride->id,
+                    'seats_cancelled' => $seatsCancelled,
+                    'refund_percentage' => $refundInfo['refund_percentage'],
+                    'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                    'policy_tier' => $refundInfo['policy_tier'],
+                    'forfeited_amount' => $totalPaid,
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address
+                ]
+            ]);
+        }
+
+        Log::info('Time-based cancellation fund redistribution completed', [
+            'booking_id' => $booking->id,
+            'transaction_id' => $transactionId,
+            'total_paid' => $totalPaid,
+            'refund_amount' => $refundAmount,
+            'driver_payout' => $nonRefundableAmount,
+            'admin_balance_before' => $adminPreviousBalance,
+            'admin_balance_after' => $primaryAdminWallet->balance,
+            'passenger_balance_before' => $passengerPreviousBalance,
+            'passenger_balance_after' => $passengerWallet->balance,
+            'driver_balance_before' => $driverPreviousBalance,
+            'driver_balance_after' => $driverWallet->balance,
+            'refund_processed' => $refundAmount > 0,
+            'driver_payout_processed' => $nonRefundableAmount > 0,
+            'no_refund_recorded' => $refundAmount == 0 && $totalPaid > 0
+        ]);
+    }
+    private function sendTimeBasedCancellationNotifications($booking, $ride, $seatsCancelled, $refundAmount, $refundProcessed, $refundInfo) {
+        $remainingSeats = $booking->seats;
+        $passenger = $booking->user;
+        $driver = $ride->driver;
+        $totalPrice = $seatsCancelled * $ride->price_per_seat;
+        $nonRefundableAmount = $totalPrice - $refundAmount;
+
+        // Notify passenger with detailed refund information
+        $passengerMessage = $remainingSeats > 0
+            ? "You've cancelled {$seatsCancelled} seat(s). You still have {$remainingSeats} seat(s) booked."
+            : "You've cancelled your booking completely.";
+
+        if ($refundProcessed && $refundAmount > 0) {
+            $passengerMessage .= " Time elapsed: " . round($refundInfo['time_elapsed_percentage'], 1) . "%. ";
+            $passengerMessage .= "Refund: $" . number_format($refundAmount, 2) . " ({$refundInfo['refund_percentage']}%). ";
+
+            if ($nonRefundableAmount > 0) {
+                $passengerMessage .= "Non-refundable amount ($" . number_format($nonRefundableAmount, 2) . ") has been transferred to the driver as per cancellation policy.";
+            }
+        } elseif ($refundInfo['refund_percentage'] == 0) {
+            $passengerMessage .= " Time elapsed: " . round($refundInfo['time_elapsed_percentage'], 1) . "%. ";
+            $passengerMessage .= "No refund available due to cancellation policy. Full amount ($" . number_format($totalPrice, 2) . ") has been transferred to the driver.";
+        }
+
+        $this->notificationService->createNotification(
+            $passenger,
+            'time_based_cancellation',
+            'Seats Cancelled - Payment Processed',
+            $passengerMessage,
+            [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'seats_cancelled' => $seatsCancelled,
+                'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                'refund_percentage' => $refundInfo['refund_percentage'],
+                'refund_amount' => $refundAmount,
+                'non_refundable_amount' => $nonRefundableAmount,
+                'policy_tier' => $refundInfo['policy_tier']
+            ],
+            'normal',
+            'ride'
+        );
+
+        // Notify driver about cancellation and payment
+        $driverMessage = $remainingSeats > 0
+            ? "{$passenger->first_name} {$passenger->last_name} cancelled {$seatsCancelled} seat(s) but still has {$remainingSeats} seat(s) booked."
+            : "{$passenger->first_name} {$passenger->last_name} cancelled their entire booking.";
+
+        $driverMessage .= " {$seatsCancelled} seat(s) are now available again.";
+
+        if ($nonRefundableAmount > 0) {
+            $driverMessage .= " You've received $" . number_format($nonRefundableAmount, 2) . " as cancellation fee based on the time-based policy ({$refundInfo['policy_tier']}).";
+        } else {
+            $driverMessage .= " Full refund was issued to passenger due to early cancellation.";
+        }
+
+        $this->notificationService->createNotification(
+            $driver,
+            'passenger_cancellation_earnings',
+            'Passenger Cancelled - Payment Received',
+            $driverMessage,
+            [
+                'booking_id' => $booking->id,
+                'ride_id' => $ride->id,
+                'passenger_id' => $passenger->id,
+                'seats_cancelled' => $seatsCancelled,
+                'earnings_from_cancellation' => $nonRefundableAmount,
+                'time_elapsed_percentage' => $refundInfo['time_elapsed_percentage'],
+                'refund_percentage' => $refundInfo['refund_percentage']
+            ],
+            'normal',
+            'ride'
+        );
+    }
+    /**
+     * Parse and validate departure time in Syria timezone
+     *
+     * @param string $timeString
+     * @return Carbon
+     * @throws \Exception
+     */
+    private function parseAndValidateDepartureTime($timeString)
+    {
+        try {
+            // Parse the input time in Syria timezone
+            $departureTime = Carbon::parse($timeString, 'Asia/Damascus');
+            $now = Carbon::now('Asia/Damascus');
+
+            // Add 5-minute buffer to prevent immediate bookings
+            $minimumTime = $now->addMinutes(5);
+
+            if ($departureTime->lte($minimumTime)) {
+                throw new \Exception(
+                    'Departure time must be at least 5 minutes in the future. ' .
+                    'Current Syria time: ' . $now->format('Y-m-d H:i:s') . '. ' .
+                    'Your input: ' . $departureTime->format('Y-m-d H:i:s')
+                );
+            }
+
+            return $departureTime;
+
+        } catch (\Carbon\Exceptions\InvalidFormatException $e) {
+            throw new \Exception('Invalid date format. Please use ISO 8601 format (e.g., 2025-09-03T14:30:00+03:00)');
+        }
+    }
+
+    /**
+     * Get current Syria time for logging/debugging
+     *
+     * @return Carbon
+     */
+    private function getSyriaTime()
+    {
+        return Carbon::now('Asia/Damascus');
+    }
+
+    /**
+     * Format time for consistent API responses
+     *
+     * @param Carbon $time
+     * @return string
+     */
+    private function formatTimeForResponse($time)
+    {
+        return $time->setTimezone('Asia/Damascus')->toISOString();
     }
 }

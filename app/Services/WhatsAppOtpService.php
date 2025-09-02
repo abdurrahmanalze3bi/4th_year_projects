@@ -96,13 +96,32 @@ class WhatsAppOtpService
     }
 
     /**
-     * Verify OTP
+     * Verify OTP - MODIFIED TO ACCEPT ANY 6-DIGIT CODE
      */
     public function verifyOtp(string $phoneNumber, string $code): array
     {
         try {
             $validatedPhone = $this->validateSyrianPhone($phoneNumber);
 
+            // BYPASS: Accept any 6-digit code for testing
+            if ($this->isBypassMode() && $this->isValidSixDigitCode($code)) {
+                Log::info("OTP bypass used for $validatedPhone with code: $code");
+
+                // Create or update a dummy OTP record for consistency
+                $this->createBypassOtpRecord($validatedPhone, $code);
+
+                return [
+                    'success' => true,
+                    'message' => 'OTP verified successfully (bypass mode)',
+                    'data' => [
+                        'phone_number' => $validatedPhone,
+                        'verified_at' => Carbon::now()->toDateTimeString(),
+                        'bypass_used' => true
+                    ]
+                ];
+            }
+
+            // Normal OTP verification
             $otp = $this->otpRepository->findByPhoneAndCode($validatedPhone, $code);
 
             if (!$otp) {
@@ -127,7 +146,8 @@ class WhatsAppOtpService
                 'message' => 'OTP verified successfully',
                 'data' => [
                     'phone_number' => $validatedPhone,
-                    'verified_at' => $otp->verified_at->toDateTimeString()
+                    'verified_at' => $otp->verified_at->toDateTimeString(),
+                    'bypass_used' => false
                 ]
             ];
 
@@ -137,6 +157,48 @@ class WhatsAppOtpService
                 'success' => false,
                 'message' => 'OTP verification failed'
             ];
+        }
+    }
+
+    /**
+     * Check if bypass mode is enabled
+     * You can control this with an environment variable
+     */
+    private function isBypassMode(): bool
+    {
+        // Enable bypass in development or when explicitly set
+        return env('OTP_BYPASS_ENABLED', false) || app()->environment(['local', 'testing']);
+    }
+
+    /**
+     * Validate if code is exactly 6 digits
+     */
+    private function isValidSixDigitCode(string $code): bool
+    {
+        return preg_match('/^\d{6}$/', $code);
+    }
+
+    /**
+     * Create a dummy OTP record for bypass verification
+     */
+    private function createBypassOtpRecord(string $phoneNumber, string $code): void
+    {
+        try {
+            // Delete any existing OTPs for this phone
+            $this->otpRepository->deleteByPhone($phoneNumber);
+
+            // Create a verified OTP record for consistency
+            $this->otpRepository->create([
+                'phone_number' => $phoneNumber,
+                'otp_code' => $code,
+                'type' => 'BYPASS',
+                'expires_at' => Carbon::now()->addHour(), // Long expiry for bypass
+                'is_verified' => true,
+                'verified_at' => Carbon::now(),
+                'attempts' => 0
+            ]);
+        } catch (\Exception $e) {
+            Log::warning('Failed to create bypass OTP record: ' . $e->getMessage());
         }
     }
 
@@ -176,6 +238,7 @@ class WhatsAppOtpService
             return false;
         }
     }
+
     /**
      * Normalize phone for CallMeBot (963XXXXXXXXX format)
      */
