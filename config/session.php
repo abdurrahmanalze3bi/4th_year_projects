@@ -146,7 +146,7 @@ return [
     'domain' => env('SESSION_DOMAIN', 'localhost'),
     'secure' => env('SESSION_SECURE_COOKIE', false),
     'http_only' => true,
-    'same_site' => 'lax',
+    'same_site' => 'none',
     /*
     |--------------------------------------------------------------------------
     | Session Cookie Domain
