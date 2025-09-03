@@ -8,6 +8,7 @@ return [
     */
 
     'paths' => [
+        'web/*',
         'api/*',
         'admin/*',
         'sanctum/csrf-cookie',
