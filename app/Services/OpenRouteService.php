@@ -121,40 +121,91 @@ class OpenRouteService implements GeocodingServiceInterface
     /**
      * Reverse‐geocode lat & lng into a human‐readable address (label).
      */
+    /**
+     * Reverse-geocode lat & lng into a human-readable address using Nominatim (Alternative)
+     */
     public function reverseGeocode(float $lat, float $lng): string
     {
-        $url = 'https://nominatim.openstreetmap.org/reverse';
-        $params = [
-            'lat'    => $lat,
-            'lon'    => $lng,
-            'format' => 'json',
-            'accept-language' => 'ar',
-        ];
+        $cacheKey = "nominatim_reverse:v1:" . md5("{$lat},{$lng}");
 
-        $resp = Http::withHeaders([
-            'User-Agent' => 'MyApp/1.0 (you@domain.com)'
-        ])
-            ->withoutVerifying()
-            ->timeout(10)
-            ->get($url, $params);
+        return Cache::remember($cacheKey, $this->cacheTtl, function () use ($lat, $lng) {
+            $url = 'https://nominatim.openstreetmap.org/reverse';
 
-        if (! $resp->successful()) {
-            throw new \Exception("Reverse geocoding failed: HTTP {$resp->status()}");
-        }
+            $params = [
+                'lat' => $lat,
+                'lon' => $lng,
+                'format' => 'json',
+                'accept-language' => 'en,ar',
+                'addressdetails' => 1,
+                'zoom' => 18,
+                'extratags' => 1
+            ];
 
-        $body = $resp->json();
-        return $body['display_name'] ?? "{$lat},{$lng}";
+            try {
+                $response = Http::withHeaders([
+                    'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)',
+                    'Accept' => 'application/json',
+                    'Referer' => env('APP_URL', 'http://localhost:8000')
+                ])
+                    ->withoutVerifying() // Only for development - enable SSL in production
+                    ->timeout($this->timeout)
+                    ->retry(2, 1000) // Retry twice with 1 second delay
+                    ->get($url, $params);
+
+                if (!$response->successful()) {
+                    Log::warning('Nominatim reverse geocoding failed', [
+                        'status' => $response->status(),
+                        'lat' => $lat,
+                        'lng' => $lng,
+                        'response_headers' => $response->headers(),
+                        'response_body' => substr($response->body(), 0, 500)
+                    ]);
+
+                    // Fallback to coordinate string
+                    return "Location: {$lat}, {$lng}";
+                }
+
+                $data = $response->json();
+
+                if (isset($data['display_name'])) {
+                    return $data['display_name'];
+                }
+
+                // Try to construct address from components
+                if (isset($data['address'])) {
+                    $address = $data['address'];
+                    $parts = [];
+
+                    // Build address in logical order
+                    if (isset($address['house_number'])) $parts[] = $address['house_number'];
+                    if (isset($address['road'])) $parts[] = $address['road'];
+                    if (isset($address['neighbourhood'])) $parts[] = $address['neighbourhood'];
+                    if (isset($address['suburb'])) $parts[] = $address['suburb'];
+                    if (isset($address['city'])) $parts[] = $address['city'];
+                    if (isset($address['state'])) $parts[] = $address['state'];
+                    if (isset($address['country'])) $parts[] = $address['country'];
+
+                    if (!empty($parts)) {
+                        return implode(', ', array_unique($parts));
+                    }
+                }
+
+                // Final fallback
+                return "Location: {$lat}, {$lng}";
+
+            } catch (\Exception $e) {
+                Log::error('Nominatim reverse geocoding exception', [
+                    'error' => $e->getMessage(),
+                    'lat' => $lat,
+                    'lng' => $lng,
+                    'trace' => $e->getTraceAsString()
+                ]);
+
+                // Return coordinate fallback
+                return "Location: {$lat}, {$lng}";
+            }
+        });
     }
-
-    /**
-     * Retrieve route details (distance, duration, geometry) between two points.
-     *
-     * Returns [
-     *   'distance' => meters (float),
-     *   'duration' => seconds (float),
-     *   'geometry' => [ [lng,lat], [lng,lat], ... ]  // LineString coordinates
-     * ]
-     */
     public function getRouteDetails(array $origin, array $destination): array
     {
         $this->validateCoordinates($origin, 'Origin');

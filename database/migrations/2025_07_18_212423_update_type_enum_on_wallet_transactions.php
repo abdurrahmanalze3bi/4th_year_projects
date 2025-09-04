@@ -16,7 +16,9 @@ return new class extends Migration
                 'debit',
                 'admin_credit',
                 'ride_creation_fee',
-                'ride_booking_payment'
+                'ride_booking_payment',
+                'no_booking_refund',
+                'ride_fee_refund'
             ])->after('user_id');
         });
 

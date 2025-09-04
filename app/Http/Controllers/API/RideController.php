@@ -1459,6 +1459,17 @@ class RideController extends Controller
             // Get ride with all bookings
             $ride = $this->rideRepository->getRideById($rideId);
 
+            Log::info('FINISH RIDE DEBUG - Initial ride data', [
+                'ride_id' => $ride->id,
+                'driver_id' => $ride->driver_id,
+                'user_id' => $user->id,
+                'ride_status' => $ride->status,
+                'available_seats' => $ride->available_seats,
+                'price_per_seat' => $ride->price_per_seat,
+                'departure_time' => $ride->departure_time,
+                'current_time' => now()
+            ]);
+
             // Check if user is the driver
             if ($ride->driver_id !== $user->id) {
                 return response()->json([
@@ -1467,10 +1478,28 @@ class RideController extends Controller
                 ], 403);
             }
 
+            // Check if ride is in valid state for finishing
             if (!in_array($ride->status, ['active', 'full'])) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Only active or full rides can be finished'
+                ], 400);
+            }
+
+            // Check if departure time has passed
+            $now = now();
+            $departureTime = Carbon::parse($ride->departure_time);
+
+            Log::info('FINISH RIDE DEBUG - Time check', [
+                'current_time' => $now->toDateTimeString(),
+                'departure_time' => $departureTime->toDateTimeString(),
+                'departure_passed' => $now->greaterThanOrEqualTo($departureTime)
+            ]);
+
+            if ($now->lessThan($departureTime)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot finish ride before departure time'
                 ], 400);
             }
 
@@ -1480,12 +1509,52 @@ class RideController extends Controller
                 ->with('user')
                 ->get();
 
+            Log::info('FINISH RIDE DEBUG - Bookings check', [
+                'total_bookings' => $ride->bookings()->count(),
+                'confirmed_bookings' => $confirmedBookings->count(),
+                'all_bookings_statuses' => $ride->bookings()->pluck('status')->toArray()
+            ]);
+
+            // CASE 1: No bookings at all - Process refund
             if ($confirmedBookings->isEmpty()) {
+                Log::info('FINISH RIDE DEBUG - Processing no-booking refund');
+
+                try {
+                    $this->processNoBookingRefund($ride);
+                    Log::info('FINISH RIDE DEBUG - Refund processed successfully');
+                } catch (\Exception $refundException) {
+                    Log::error('FINISH RIDE DEBUG - Refund processing failed', [
+                        'error' => $refundException->getMessage(),
+                        'trace' => $refundException->getTraceAsString()
+                    ]);
+                    throw $refundException;
+                }
+
+                // Update ride status directly to finished (no confirmation needed)
+                $ride->status = 'finished';
+                $ride->finished_at = now();
+                $ride->save();
+
+                DB::commit();
+
+                Log::info('Ride finished with no bookings - refund processed', [
+                    'ride_id' => $ride->id,
+                    'driver_id' => $user->id,
+                    'departure_time' => $ride->departure_time,
+                    'refund_processed' => true
+                ]);
+
                 return response()->json([
-                    'success' => false,
-                    'message' => 'No confirmed bookings found for this ride'
-                ], 400);
+                    'success' => true,
+                    'message' => 'Ride finished successfully. Since no passengers booked, your ride creation fee has been refunded.',
+                    'refund_processed' => true
+                ], 200);
             }
+
+            // CASE 2: Has bookings - Normal confirmation process
+            Log::info('FINISH RIDE DEBUG - Has bookings, entering confirmation process', [
+                'confirmed_bookings_count' => $confirmedBookings->count()
+            ]);
 
             // Update ride status to awaiting_confirmation
             $ride->status = 'awaiting_confirmation';
@@ -1494,7 +1563,7 @@ class RideController extends Controller
 
             DB::commit();
 
-            // Notify driver and passengers
+            // Notify driver and passengers for confirmation
             $this->notifyForConfirmation($ride);
 
             return response()->json([
@@ -1504,11 +1573,198 @@ class RideController extends Controller
 
         } catch (\Exception $e) {
             DB::rollBack();
+
+            Log::error('FINISH RIDE DEBUG - Ride finish failed', [
+                'ride_id' => $rideId,
+                'driver_id' => $user->id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Ride completion failed: ' . $e->getMessage()
             ], 400);
         }
+    }
+
+    /**
+     * Process refund for rides with no bookings
+     */
+
+
+    /**
+     * CORRECTED: Process refund for rides with no bookings
+     */
+    private function processNoBookingRefund(Ride $ride)
+    {
+        // Calculate the original ride creation fee (5% of total ride price)
+        // For rides with no bookings, available_seats equals the original number of seats
+        $originalSeats = $ride->available_seats;
+        $totalRidePrice = $ride->price_per_seat * $originalSeats;
+        $refundAmount = $totalRidePrice * 0.05;
+
+        Log::info('Processing no-booking refund calculation', [
+            'ride_id' => $ride->id,
+            'price_per_seat' => $ride->price_per_seat,
+            'original_seats' => $originalSeats,
+            'total_ride_price' => $totalRidePrice,
+            'refund_amount' => $refundAmount,
+            'calculation' => "({$ride->price_per_seat} × {$originalSeats}) × 0.05 = {$refundAmount}"
+        ]);
+
+        // Get SyCash wallet (where the fee was originally paid to)
+        $syCashConfig = AdminDashboardController::ADMIN_CONFIGS['sycash'];
+        $syCashWallet = Wallet::where('phone_number', $syCashConfig['phone'])
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Get driver wallet
+        $driverWallet = Wallet::where('user_id', $ride->driver_id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Log initial balances
+        Log::info('Initial wallet balances before refund', [
+            'sycash_balance' => $syCashWallet->balance,
+            'driver_balance' => $driverWallet->balance,
+            'refund_amount' => $refundAmount
+        ]);
+
+        // Verify SyCash has sufficient balance for refund
+        if ($syCashWallet->balance < $refundAmount) {
+            throw new \Exception("Insufficient SyCash wallet balance for refund. Required: {$refundAmount}, Available: {$syCashWallet->balance}");
+        }
+
+        // Store previous balances for transaction records
+        $syCashPreviousBalance = $syCashWallet->balance;
+        $driverPreviousBalance = $driverWallet->balance;
+
+        // Process the refund - CORRECTED CALCULATION
+        $syCashWallet->balance = $syCashPreviousBalance - $refundAmount;
+        $driverWallet->balance = $driverPreviousBalance + $refundAmount;
+
+        // Save wallets
+        $syCashWallet->save();
+        $driverWallet->save();
+
+        // Log final balances
+        Log::info('Final wallet balances after refund', [
+            'sycash_previous' => $syCashPreviousBalance,
+            'sycash_new' => $syCashWallet->balance,
+            'driver_previous' => $driverPreviousBalance,
+            'driver_new' => $driverWallet->balance,
+            'refund_processed' => $refundAmount
+        ]);
+
+        // Create transaction records
+        $transactionId = 'NO_BOOKING_REFUND_' . time() . '_' . Str::random(6);
+
+        // SyCash transaction (debit) - Money going OUT of SyCash
+        WalletTransaction::create([
+            'wallet_id' => $syCashWallet->id,
+            'user_id' => $syCashWallet->user_id,
+            'type' => 'no_booking_refund',
+            'amount' => -$refundAmount, // NEGATIVE because money is leaving SyCash wallet
+            'previous_balance' => $syCashPreviousBalance,
+            'new_balance' => $syCashWallet->balance,
+            'description' => "Refund ride creation fee - No bookings received for ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'SYCASH_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'ride_id' => $ride->id,
+                'driver_id' => $ride->driver_id,
+                'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                'original_fee_percentage' => 5,
+                'total_ride_price' => $totalRidePrice,
+                'original_seats' => $originalSeats,
+                'price_per_seat' => $ride->price_per_seat,
+                'refund_reason' => 'no_bookings_received',
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toDateTimeString(),
+                'calculation_details' => [
+                    'price_per_seat' => $ride->price_per_seat,
+                    'original_seats' => $originalSeats,
+                    'total_ride_price' => $totalRidePrice,
+                    'fee_percentage' => 5,
+                    'refund_amount' => $refundAmount
+                ]
+            ]
+        ]);
+
+        // Driver transaction (credit) - Money coming INTO driver wallet
+        WalletTransaction::create([
+            'wallet_id' => $driverWallet->id,
+            'user_id' => $driverWallet->user_id,
+            'type' => 'ride_fee_refund',
+            'amount' => $refundAmount, // POSITIVE because money is entering driver wallet
+            'previous_balance' => $driverPreviousBalance,
+            'new_balance' => $driverWallet->balance,
+            'description' => "Ride creation fee refund - No passengers booked your ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'DRIVER_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'ride_id' => $ride->id,
+                'refund_percentage' => 5,
+                'total_ride_price' => $totalRidePrice,
+                'original_seats' => $originalSeats,
+                'price_per_seat' => $ride->price_per_seat,
+                'refund_reason' => 'no_bookings_received',
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toDateTimeString(),
+                'calculation_details' => [
+                    'formula' => 'price_per_seat × original_seats × 0.05',
+                    'calculation' => "{$ride->price_per_seat} × {$originalSeats} × 0.05 = {$refundAmount}"
+                ]
+            ]
+        ]);
+
+        // Send notification to driver
+        $this->notificationService->createNotification(
+            $ride->driver,
+            'ride_fee_refunded',
+            'Ride Creation Fee Refunded',
+            "Your ride creation fee of " . number_format($refundAmount, 0) . " SYP has been refunded since no passengers booked your ride from {$ride->pickup_address} to {$ride->destination_address}.",
+            [
+                'ride_id' => $ride->id,
+                'refund_amount' => $refundAmount,
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toISOString(),
+                'transaction_id' => $transactionId,
+                'new_wallet_balance' => $driverWallet->balance
+            ],
+            'high',
+            'wallet'
+        );
+
+        Log::info('No-booking refund processed successfully', [
+            'ride_id' => $ride->id,
+            'driver_id' => $ride->driver_id,
+            'refund_amount' => $refundAmount,
+            'calculation' => [
+                'price_per_seat' => $ride->price_per_seat,
+                'original_seats' => $originalSeats,
+                'total_ride_price' => $totalRidePrice,
+                'fee_percentage' => '5%',
+                'refund_calculated' => $refundAmount
+            ],
+            'balance_changes' => [
+                'sycash' => [
+                    'before' => $syCashPreviousBalance,
+                    'after' => $syCashWallet->balance,
+                    'change' => -$refundAmount
+                ],
+                'driver' => [
+                    'before' => $driverPreviousBalance,
+                    'after' => $driverWallet->balance,
+                    'change' => $refundAmount
+                ]
+            ],
+            'transaction_id' => $transactionId
+        ]);
     }
 
     /**
@@ -2376,11 +2632,13 @@ class RideController extends Controller
     public function getMyBookings(Request $request) {
         $user = $request->user();
 
+        // If user is not verified as passenger, return empty list instead of error
         if (!$user->is_verified_passenger) {
             return response()->json([
-                'success' => false,
-                'message' => 'You must be verified as a passenger to view bookings.'
-            ], 403);
+                'success' => true,
+                'data' => [],
+                'message' => 'No bookings found. Complete passenger verification to start booking rides.'
+            ], 200);
         }
 
         try {
@@ -2404,11 +2662,9 @@ class RideController extends Controller
                         'seats' => $booking->seats,
                         'total_price' => $booking->seats * $ride->price_per_seat,
                         'booking_date' => $booking->created_at->toIso8601String(),
-
                         // Communication numbers - clearly labeled
                         'passenger_communication_number' => $booking->communication_number,
                         'driver_communication_number' => $ride->communication_number,
-
                         // Ride details
                         'ride_id' => $ride->id,
                         'pickup_address' => $ride->pickup_address,
@@ -2420,9 +2676,8 @@ class RideController extends Controller
                         'payment_method' => $ride->payment_method,
                         'vehicle_type' => $ride->vehicle_type,
                         'ride_status' => $ride->status,
-
                         // Driver details - INCLUDING driver_id
-                        'driver_id' => $ride->driver_id, // Added this line
+                        'driver_id' => $ride->driver_id,
                         'driver_name' => trim($ride->driver->first_name . ' ' . $ride->driver->last_name),
                         'driver_rating' => $ride->driver->driver_rating ?? 0,
                         'driver_avatar' => $ride->driver->profile && $ride->driver->profile->profile_photo
