@@ -434,22 +434,22 @@ class RideRepository implements RideRepositoryInterface
         });
     }
     // app/Repositories/RideRepository.php
-    public function cancelRide(int $rideId, int $driverId): Ride
-    {
-        return DB::transaction(function () use ($rideId, $driverId) {
-            $ride = Ride::where('driver_id', $driverId)
-                ->findOrFail($rideId);
-            if ($ride->status === 'cancelled') {
-                throw new \Exception('Ride is already cancelled');
-            }
-
-            $ride->status = 'cancelled';
-            $ride->save();
-
-            Log::info('Ride cancelled', ['ride_id' => $rideId, 'driver_id' => $driverId]);
-            return $ride->fresh();
-        });
-    }
+//    public function cancelRide(int $rideId, int $driverId): Ride
+//    {
+//        return DB::transaction(function () use ($rideId, $driverId) {
+//            $ride = Ride::where('driver_id', $driverId)
+//                ->findOrFail($rideId);
+//            if ($ride->status === 'cancelled') {
+//                throw new \Exception('Ride is already cancelled');
+//            }
+//
+//            $ride->status = 'cancelled';
+//            $ride->save();
+//
+//            Log::info('Ride cancelled', ['ride_id' => $rideId, 'driver_id' => $driverId]);
+//            return $ride->fresh();
+//        });
+//    }
     /**
      * Create a ride with pre-calculated geometry
      */

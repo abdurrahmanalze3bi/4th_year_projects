@@ -13,20 +13,20 @@ class OpenRouteService implements GeocodingServiceInterface
 {
     protected string $apiKey;
     protected string $baseUrl = 'https://api.openrouteservice.org/';
-
     protected int $cacheTtl;
     protected bool $sslVerify;
     protected float $timeout;
 
     public function __construct(
         string $apiKey,
-        int $cacheTtl = 3600,    // Default TTL in seconds
-        bool $sslVerify = false, // Disable SSL verify locally, enable in production
-        float $timeout = 30.0    // Request timeout in seconds
+        int $cacheTtl = 3600,
+        bool $sslVerify = false,
+        float $timeout = 30.0
     ) {
         if (empty($apiKey)) {
             throw new \InvalidArgumentException('OpenRouteService API key is required.');
         }
+
         $this->apiKey    = $apiKey;
         $this->cacheTtl  = $cacheTtl;
         $this->sslVerify = $sslVerify;
@@ -41,171 +41,467 @@ class OpenRouteService implements GeocodingServiceInterface
 
     /**
      * Geocode a human-readable address into ['lat' => float, 'lng' => float, 'label' => string].
+     * Now prioritizes Arabic place names for Syria
      */
     public function geocodeAddress(string $address): array
     {
-        $url = 'https://nominatim.openstreetmap.org/search';
+        $cacheKey = "geocode_arabic:v1:" . md5($address);
 
-        $params = [
-            'q'               => $address,
-            'format'          => 'json',
-            'limit'           => 1,
-            'addressdetails'  => 1,
-            'accept-language' => 'ar',
-            'countrycodes'    => 'sy',  // restrict to Syria
-            'bounded'         => 1,     // hard‐limit to the country box
-        ];
+        return Cache::remember($cacheKey, $this->cacheTtl, function () use ($address) {
+            // Try multiple geocoding sources for better Arabic results
+            $result = $this->tryNominatimArabic($address);
 
-        $response = Http::withHeaders([
-            'User-Agent' => 'YourApp/1.0 (contact@youremail.com)'
-        ])
-            ->withoutVerifying()
-            ->timeout(10)
-            ->retry(2, 500)
-            ->get($url, $params);
+            if (!$result) {
+                $result = $this->tryMapboxArabic($address);
+            }
 
-        if (! $response->successful()) {
-            throw new \Exception("Geocoding failed: HTTP {$response->status()}");
-        }
+            if (!$result) {
+                // Fallback to English Nominatim
+                $result = $this->tryNominatimEnglish($address);
+            }
 
-        $data = $response->json();
-        if (empty($data)) {
-            throw new \Exception("No location found for “{$address}”");
-        }
+            if (!$result) {
+                throw new \Exception("No location found for \"{$address}\"");
+            }
 
-        return [
-            'label' => $data[0]['display_name'],
-            'lat'   => (float)$data[0]['lat'],
-            'lng'   => (float)$data[0]['lon'],
-        ];
+            return $result;
+        });
     }
 
     /**
-     * Autocomplete partial text with up to 6 results from Nominatim.
+     * Try geocoding with Nominatim optimized for Arabic results
      */
-    public function autocomplete(string $partial): array
+    private function tryNominatimArabic(string $address): ?array
     {
         $url = 'https://nominatim.openstreetmap.org/search';
-
         $params = [
-            'q'               => $partial,
-            'format'          => 'json',
-            'limit'           => 6,
-            'addressdetails'  => 1,
-            'accept-language' => 'ar',
-            'viewbox'         => '35.5,37.5,42.0,32.0', // left, top, right, bottom
-            'bounded'         => 1,
+            'q' => $address,
+            'format' => 'json',
+            'limit' => 3, // Get multiple results to find best Arabic one
+            'addressdetails' => 1,
+            'accept-language' => 'ar,en', // Prioritize Arabic, fallback to English
+            'countrycodes' => 'sy',
+            'bounded' => 1,
+            'extratags' => 1,
+            'namedetails' => 1, // Get name variants including Arabic
         ];
 
-        $resp = Http::withHeaders([
-            'User-Agent' => 'YourAppName/1.0 (contact@yourdomain.com)'
-        ])
-            ->withoutVerifying()
-            ->timeout(10)
-            ->retry(2, 500)
-            ->get($url, $params);
-
-        if (! $resp->successful()) {
-            throw new \Exception("Nominatim autocomplete failed: HTTP {$resp->status()}");
-        }
-
-        return collect($resp->json())
-            ->map(fn($f) => [
-                'label' => $f['display_name'],
-                'lat'   => $f['lat'],
-                'lng'   => $f['lon'],
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)',
+                'Accept' => 'application/json',
+                'Accept-Language' => 'ar,en;q=0.8'
             ])
-            ->all();
+                ->withoutVerifying()
+                ->timeout(10)
+                ->retry(2, 500)
+                ->get($url, $params);
+
+            if (!$response->successful()) {
+                Log::warning('Nominatim Arabic geocoding failed', [
+                    'status' => $response->status(),
+                    'address' => $address
+                ]);
+                return null;
+            }
+
+            $data = $response->json();
+            if (empty($data)) {
+                return null;
+            }
+
+            // Find the best result with Arabic name
+            foreach ($data as $result) {
+                $arabicName = $this->extractBestArabicName($result);
+
+                if ($arabicName) {
+                    Log::info('Found Arabic geocoding result', [
+                        'address' => $address,
+                        'arabic_name' => $arabicName,
+                        'lat' => $result['lat'],
+                        'lng' => $result['lon']
+                    ]);
+
+                    return [
+                        'label' => $arabicName,
+                        'lat' => (float)$result['lat'],
+                        'lng' => (float)$result['lon'],
+                    ];
+                }
+            }
+
+            // If no Arabic found, return first result
+            return [
+                'label' => $data[0]['display_name'],
+                'lat' => (float)$data[0]['lat'],
+                'lng' => (float)$data[0]['lon'],
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('Nominatim Arabic geocoding exception', [
+                'error' => $e->getMessage(),
+                'address' => $address
+            ]);
+            return null;
+        }
     }
 
     /**
-     * Reverse‐geocode lat & lng into a human‐readable address (label).
+     * Extract the best Arabic name from Nominatim result
      */
+    private function extractBestArabicName(array $result): ?string
+    {
+        // Check namedetails for Arabic variants
+        if (isset($result['namedetails'])) {
+            $nameDetails = $result['namedetails'];
+
+            // Priority order for Arabic name fields
+            $arabicFields = ['name:ar', 'alt_name:ar', 'official_name:ar', 'name'];
+
+            foreach ($arabicFields as $field) {
+                if (isset($nameDetails[$field]) && $this->containsArabic($nameDetails[$field])) {
+                    return $nameDetails[$field];
+                }
+            }
+        }
+
+        // Check if display_name contains Arabic
+        if (isset($result['display_name']) && $this->containsArabic($result['display_name'])) {
+            return $result['display_name'];
+        }
+
+        // Build Arabic address from components if available
+        if (isset($result['address'])) {
+            $arabicAddress = $this->buildArabicAddress($result['address']);
+            if ($arabicAddress) {
+                return $arabicAddress;
+            }
+        }
+
+        return null;
+    }
+
     /**
-     * Reverse-geocode lat & lng into a human-readable address using Nominatim (Alternative)
+     * Check if text contains Arabic characters
+     */
+    private function containsArabic(string $text): bool
+    {
+        return preg_match('/[\x{0600}-\x{06FF}]/u', $text);
+    }
+
+    /**
+     * Build Arabic address from address components
+     */
+    private function buildArabicAddress(array $address): ?string
+    {
+        $arabicParts = [];
+
+        // Priority components with potential Arabic names
+        $components = [
+            'house_number', 'road', 'neighbourhood', 'suburb',
+            'village', 'town', 'city', 'county', 'state', 'country'
+        ];
+
+        foreach ($components as $component) {
+            if (isset($address[$component])) {
+                $value = $address[$component];
+                // Prefer Arabic text, but include English if needed
+                if ($this->containsArabic($value) || empty($arabicParts)) {
+                    $arabicParts[] = $value;
+                }
+            }
+        }
+
+        return !empty($arabicParts) ? implode(', ', array_unique($arabicParts)) : null;
+    }
+
+    /**
+     * Try Mapbox geocoding for Arabic results (if you have Mapbox token)
+     */
+    private function tryMapboxArabic(string $address): ?array
+    {
+        // Only try if Mapbox token is configured
+        $mapboxToken = env('MAPBOX_ACCESS_TOKEN');
+        if (!$mapboxToken) {
+            return null;
+        }
+
+        $url = "https://api.mapbox.com/geocoding/v5/mapbox.places/" . urlencode($address) . ".json";
+        $params = [
+            'access_token' => $mapboxToken,
+            'country' => 'sy',
+            'language' => 'ar',
+            'limit' => 1
+        ];
+
+        try {
+            $response = Http::timeout(10)
+                ->retry(2, 500)
+                ->get($url, $params);
+
+            if ($response->successful()) {
+                $data = $response->json();
+                if (!empty($data['features'])) {
+                    $feature = $data['features'][0];
+                    return [
+                        'label' => $feature['place_name_ar'] ?? $feature['place_name'],
+                        'lat' => (float)$feature['geometry']['coordinates'][1],
+                        'lng' => (float)$feature['geometry']['coordinates'][0],
+                    ];
+                }
+            }
+        } catch (\Exception $e) {
+            Log::debug('Mapbox geocoding failed', ['error' => $e->getMessage()]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Fallback to English Nominatim
+     */
+    private function tryNominatimEnglish(string $address): ?array
+    {
+        $url = 'https://nominatim.openstreetmap.org/search';
+        $params = [
+            'q' => $address,
+            'format' => 'json',
+            'limit' => 1,
+            'addressdetails' => 1,
+            'accept-language' => 'en',
+            'countrycodes' => 'sy',
+            'bounded' => 1,
+        ];
+
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)'
+            ])
+                ->withoutVerifying()
+                ->timeout(10)
+                ->get($url, $params);
+
+            if ($response->successful()) {
+                $data = $response->json();
+                if (!empty($data)) {
+                    return [
+                        'label' => $data[0]['display_name'],
+                        'lat' => (float)$data[0]['lat'],
+                        'lng' => (float)$data[0]['lon'],
+                    ];
+                }
+            }
+        } catch (\Exception $e) {
+            Log::error('English Nominatim fallback failed', ['error' => $e->getMessage()]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Reverse-geocode lat & lng into a human-readable Arabic address
      */
     public function reverseGeocode(float $lat, float $lng): string
     {
-        $cacheKey = "nominatim_reverse:v1:" . md5("{$lat},{$lng}");
+        $cacheKey = "reverse_geocode_arabic:v1:" . md5("{$lat},{$lng}");
 
         return Cache::remember($cacheKey, $this->cacheTtl, function () use ($lat, $lng) {
-            $url = 'https://nominatim.openstreetmap.org/reverse';
+            // Try Arabic reverse geocoding first
+            $arabicResult = $this->reverseGeocodeArabic($lat, $lng);
+            if ($arabicResult) {
+                return $arabicResult;
+            }
 
-            $params = [
-                'lat' => $lat,
-                'lon' => $lng,
-                'format' => 'json',
-                'accept-language' => 'en,ar',
-                'addressdetails' => 1,
-                'zoom' => 18,
-                'extratags' => 1
-            ];
+            // Fallback to English
+            return $this->reverseGeocodeEnglish($lat, $lng);
+        });
+    }
 
-            try {
-                $response = Http::withHeaders([
-                    'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)',
-                    'Accept' => 'application/json',
-                    'Referer' => env('APP_URL', 'http://localhost:8000')
-                ])
-                    ->withoutVerifying() // Only for development - enable SSL in production
-                    ->timeout($this->timeout)
-                    ->retry(2, 1000) // Retry twice with 1 second delay
-                    ->get($url, $params);
+    /**
+     * Reverse geocode with Arabic priority
+     */
+    private function reverseGeocodeArabic(float $lat, float $lng): ?string
+    {
+        $url = 'https://nominatim.openstreetmap.org/reverse';
+        $params = [
+            'lat' => $lat,
+            'lon' => $lng,
+            'format' => 'json',
+            'accept-language' => 'ar,en',
+            'addressdetails' => 1,
+            'zoom' => 18,
+            'extratags' => 1,
+            'namedetails' => 1
+        ];
 
-                if (!$response->successful()) {
-                    Log::warning('Nominatim reverse geocoding failed', [
-                        'status' => $response->status(),
-                        'lat' => $lat,
-                        'lng' => $lng,
-                        'response_headers' => $response->headers(),
-                        'response_body' => substr($response->body(), 0, 500)
-                    ]);
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)',
+                'Accept' => 'application/json',
+                'Accept-Language' => 'ar,en;q=0.8'
+            ])
+                ->withoutVerifying()
+                ->timeout($this->timeout)
+                ->retry(2, 1000)
+                ->get($url, $params);
 
-                    // Fallback to coordinate string
-                    return "Location: {$lat}, {$lng}";
+            if (!$response->successful()) {
+                return null;
+            }
+
+            $data = $response->json();
+
+            // Try to get Arabic name first
+            $arabicName = $this->extractBestArabicName($data);
+            if ($arabicName) {
+                Log::info('Arabic reverse geocoding successful', [
+                    'lat' => $lat,
+                    'lng' => $lng,
+                    'arabic_name' => $arabicName
+                ]);
+                return $arabicName;
+            }
+
+            // Build from address components with Arabic preference
+            if (isset($data['address'])) {
+                $arabicAddress = $this->buildArabicAddress($data['address']);
+                if ($arabicAddress) {
+                    return $arabicAddress;
                 }
+            }
 
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error('Arabic reverse geocoding exception', [
+                'error' => $e->getMessage(),
+                'lat' => $lat,
+                'lng' => $lng
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Reverse geocode fallback to English
+     */
+    private function reverseGeocodeEnglish(float $lat, float $lng): string
+    {
+        $url = 'https://nominatim.openstreetmap.org/reverse';
+        $params = [
+            'lat' => $lat,
+            'lon' => $lng,
+            'format' => 'json',
+            'accept-language' => 'en',
+            'addressdetails' => 1,
+            'zoom' => 18
+        ];
+
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)'
+            ])
+                ->withoutVerifying()
+                ->timeout($this->timeout)
+                ->get($url, $params);
+
+            if ($response->successful()) {
                 $data = $response->json();
 
                 if (isset($data['display_name'])) {
                     return $data['display_name'];
                 }
 
-                // Try to construct address from components
                 if (isset($data['address'])) {
-                    $address = $data['address'];
-                    $parts = [];
+                    return $this->buildEnglishAddress($data['address']);
+                }
+            }
 
-                    // Build address in logical order
-                    if (isset($address['house_number'])) $parts[] = $address['house_number'];
-                    if (isset($address['road'])) $parts[] = $address['road'];
-                    if (isset($address['neighbourhood'])) $parts[] = $address['neighbourhood'];
-                    if (isset($address['suburb'])) $parts[] = $address['suburb'];
-                    if (isset($address['city'])) $parts[] = $address['city'];
-                    if (isset($address['state'])) $parts[] = $address['state'];
-                    if (isset($address['country'])) $parts[] = $address['country'];
+        } catch (\Exception $e) {
+            Log::error('English reverse geocoding failed', [
+                'error' => $e->getMessage(),
+                'lat' => $lat,
+                'lng' => $lng
+            ]);
+        }
 
-                    if (!empty($parts)) {
-                        return implode(', ', array_unique($parts));
-                    }
+        return "الموقع: {$lat}, {$lng}"; // Arabic fallback
+    }
+
+    /**
+     * Build English address from components
+     */
+    private function buildEnglishAddress(array $address): string
+    {
+        $parts = [];
+        $components = ['house_number', 'road', 'neighbourhood', 'suburb', 'city', 'state', 'country'];
+
+        foreach ($components as $component) {
+            if (isset($address[$component])) {
+                $parts[] = $address[$component];
+            }
+        }
+
+        return !empty($parts) ? implode(', ', array_unique($parts)) : "Location";
+    }
+
+    /**
+     * Autocomplete with Arabic results
+     */
+    public function autocomplete(string $partial): array
+    {
+        $cacheKey = "autocomplete_arabic:v1:" . md5($partial);
+
+        return Cache::remember($cacheKey, $this->cacheTtl / 2, function () use ($partial) {
+            $url = 'https://nominatim.openstreetmap.org/search';
+            $params = [
+                'q' => $partial,
+                'format' => 'json',
+                'limit' => 6,
+                'addressdetails' => 1,
+                'accept-language' => 'ar,en',
+                'viewbox' => '35.5,37.5,42.0,32.0',
+                'bounded' => 1,
+                'namedetails' => 1,
+                'extratags' => 1
+            ];
+
+            try {
+                $resp = Http::withHeaders([
+                    'User-Agent' => 'SyRide-App/1.0 (contact@syride.com)',
+                    'Accept-Language' => 'ar,en;q=0.8'
+                ])
+                    ->withoutVerifying()
+                    ->timeout(10)
+                    ->retry(2, 500)
+                    ->get($url, $params);
+
+                if (!$resp->successful()) {
+                    throw new \Exception("Nominatim autocomplete failed: HTTP {$resp->status()}");
                 }
 
-                // Final fallback
-                return "Location: {$lat}, {$lng}";
+                return collect($resp->json())
+                    ->map(function($result) {
+                        $arabicName = $this->extractBestArabicName($result);
+                        return [
+                            'label' => $arabicName ?: $result['display_name'],
+                            'lat' => $result['lat'],
+                            'lng' => $result['lon'],
+                        ];
+                    })
+                    ->all();
 
             } catch (\Exception $e) {
-                Log::error('Nominatim reverse geocoding exception', [
+                Log::error('Arabic autocomplete failed', [
                     'error' => $e->getMessage(),
-                    'lat' => $lat,
-                    'lng' => $lng,
-                    'trace' => $e->getTraceAsString()
+                    'partial' => $partial
                 ]);
-
-                // Return coordinate fallback
-                return "Location: {$lat}, {$lng}";
+                throw $e;
             }
         });
     }
+
+    // Keep all other existing methods unchanged...
     public function getRouteDetails(array $origin, array $destination): array
     {
         $this->validateCoordinates($origin, 'Origin');
@@ -246,9 +542,8 @@ class OpenRouteService implements GeocodingServiceInterface
         });
     }
 
-    /**
-     * Handle the HTTP response from ORS and extract distance, duration, and geometry.
-     */
+    // ... [Keep all other existing methods unchanged - handleRouteResponse, validateCoordinates, etc.]
+
     private function handleRouteResponse(HttpResponse $response, ?array $origin = null, ?array $destination = null): array
     {
         Log::debug("Entering handleRouteResponse. HTTP status: {$response->status()}", [
@@ -296,27 +591,26 @@ class OpenRouteService implements GeocodingServiceInterface
             Log::warning("Invalid route response format or missing summary.", [
                 'origin'      => $origin,
                 'destination' => $destination,
-                'body_preview'=> strlen($respPreview) > 500
-                    ? substr($respPreview, 0, 497) . "..."
-                    : $respPreview,
+                'body_preview'=> strlen($respPreview) > 500 ? substr($respPreview, 0, 497) . "..." : $respPreview,
             ]);
             throw new \Exception("Invalid route response from ORS (missing summary).");
         }
 
         $route0  = $data['routes'][0];
         $summary = $route0['summary'];
+
         if (
-            !isset($summary['distance']) || !is_numeric($summary['distance']) ||
-            !isset($summary['duration']) || !is_numeric($summary['duration'])
+            !isset($summary['distance']) ||
+            !is_numeric($summary['distance']) ||
+            !isset($summary['duration']) ||
+            !is_numeric($summary['duration'])
         ) {
             $respPreview = json_encode($data);
             Log::warning("Route summary missing or invalid.", [
                 'origin'       => $origin,
                 'destination'  => $destination,
                 'summary'      => $summary,
-                'body_preview' => strlen($respPreview) > 500
-                    ? substr($respPreview, 0, 497) . "..."
-                    : $respPreview,
+                'body_preview' => strlen($respPreview) > 500 ? substr($respPreview, 0, 497) . "..." : $respPreview,
             ]);
             throw new \Exception("Route summary incomplete or invalid (distance/duration).");
         }
@@ -347,9 +641,6 @@ class OpenRouteService implements GeocodingServiceInterface
         return $result;
     }
 
-    /**
-     * Ensure the coordinates array has valid 'lat' and 'lng' keys within ranges.
-     */
     private function validateCoordinates(array $coordinates, string $label = 'Coordinates'): void
     {
         $requiredKeys = ['lat', 'lng'];
@@ -361,6 +652,7 @@ class OpenRouteService implements GeocodingServiceInterface
                 throw new \InvalidArgumentException("{$label}: '{$key}' must be numeric.");
             }
         }
+
         if ($coordinates['lat'] < -90 || $coordinates['lat'] > 90) {
             throw new \InvalidArgumentException("{$label}: Latitude out of range (-90 to 90).");
         }
@@ -369,9 +661,6 @@ class OpenRouteService implements GeocodingServiceInterface
         }
     }
 
-    /**
-     * Log detailed information when API errors occur.
-     */
     private function logApiError(string $type, HttpResponse $response, array $context = []): void
     {
         Log::error("OpenRouteService {$type} API Error", array_merge([
@@ -381,6 +670,24 @@ class OpenRouteService implements GeocodingServiceInterface
             'request_url' => (string)$response->effectiveUri(),
         ], $context));
     }
+
+    private function calculateHaversineDistance(array $point1, array $point2): float
+    {
+        $lat1 = deg2rad($point1['lat']);
+        $lon1 = deg2rad($point1['lng']);
+        $lat2 = deg2rad($point2['lat']);
+        $lon2 = deg2rad($point2['lng']);
+
+        $deltaLat = $lat2 - $lat1;
+        $deltaLon = $lon2 - $lon1;
+
+        $a = sin($deltaLat/2) * sin($deltaLat/2) + cos($lat1) * cos($lat2) * sin($deltaLon/2) * sin($deltaLon/2);
+        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
+
+        return 6371000 * $c; // Earth radius in meters
+    }
+
+    // Keep other methods like getRouteAlternatives unchanged...
 
     // Optional fluent setters if you need to override settings at runtime:
 
@@ -867,24 +1174,7 @@ class OpenRouteService implements GeocodingServiceInterface
         $points[] = $end;
         return $points;
     }
-    private function calculateHaversineDistance(array $point1, array $point2): float
-    {
-        $lat1 = deg2rad($point1['lat']);
-        $lon1 = deg2rad($point1['lng']);
-        $lat2 = deg2rad($point2['lat']);
-        $lon2 = deg2rad($point2['lng']);
 
-        $deltaLat = $lat2 - $lat1;
-        $deltaLon = $lon2 - $lon1;
-
-        $a = sin($deltaLat/2) * sin($deltaLat/2) +
-            cos($lat1) * cos($lat2) *
-            sin($deltaLon/2) * sin($deltaLon/2);
-
-        $c = 2 * atan2(sqrt($a), sqrt(1-$a));
-
-        return 6371000 * $c; // Earth radius in meters
-    }
     /**
      * Calculate haversine distance between two points
      */

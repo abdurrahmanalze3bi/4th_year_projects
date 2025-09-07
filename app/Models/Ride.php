@@ -21,7 +21,7 @@ class Ride extends Model
         'driver_id',
         'pickup_address',
         'destination_address',
-
+        'status',
         'distance',
         'duration',
         'route_geometry',       // JSON
@@ -33,7 +33,8 @@ class Ride extends Model
         'booking_type',
         'communication_number',
         'notes',
-        'finished_at' => 'datetime',
+        'finished_at',
+
         // We will write to pickup_location and destination_location via the setter
     ];
 
@@ -49,6 +50,7 @@ class Ride extends Model
           'driver_confirmed_at' => 'datetime',
         'payment_method' => 'string',
         'booking_type' => 'string',
+        'finished_at' => 'datetime',
     ];
 
     //------------------------------------------------------------------------//

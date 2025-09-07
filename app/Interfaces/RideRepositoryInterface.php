@@ -24,5 +24,5 @@ interface RideRepositoryInterface
     public function bookRide(int $rideId, array $bookingData): Booking;
 
     public function searchRides(array $criteria): Collection;
-    public function cancelRide(int $rideId, int $driverId): Ride;
+//    public function cancelRide(int $rideId, int $driverId): Ride;
 }

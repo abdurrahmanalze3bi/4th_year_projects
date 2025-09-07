@@ -919,46 +919,372 @@ class RideController extends Controller
                 abort(403, 'Only the ride driver can cancel the ride');
             }
 
-            $bookings = $ride->bookings()
+            // Prevent cancellation of already cancelled or finished rides
+            if (in_array($ride->status, ['cancelled', 'finished'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot cancel a ride that is already ' . $ride->status
+                ], 400);
+            }
+
+            // Check if departure time has arrived or passed
+            $now = Carbon::now('Asia/Damascus');
+            $departureTime = Carbon::parse($ride->departure_time, 'Asia/Damascus');
+
+            if ($now->greaterThanOrEqualTo($departureTime)) {
+                Log::warning('Driver attempted to cancel ride after departure time', [
+                    'ride_id' => $ride->id,
+                    'driver_id' => $user->id,
+                    'current_time' => $now->toDateTimeString(),
+                    'departure_time' => $departureTime->toDateTimeString(),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot cancel ride after departure time has arrived. Current time: ' .
+                        $now->format('H:i') . ', Departure time: ' . $departureTime->format('H:i'),
+                    'current_time' => $now->format('Y-m-d H:i:s'),
+                    'departure_time' => $departureTime->format('Y-m-d H:i:s')
+                ], 400);
+            }
+
+            // Get confirmed bookings that need refunds
+            $confirmedBookings = $ride->bookings()
                 ->whereIn('status', [Booking::PENDING, Booking::CONFIRMED])
+                ->with('user.wallet')
                 ->get();
 
-            // 1. mark every seat as cancelled
-            foreach ($bookings as $booking) {
+            // Calculate total refund amounts for passengers
+            $totalPassengerRefunds = $confirmedBookings->sum(function ($booking) use ($ride) {
+                return $booking->seats * $ride->price_per_seat;
+            });
+
+            // FIXED: Calculate original seats properly
+            // Total seats when ride was created = current available + booked seats
+            $bookedSeats = $confirmedBookings->sum('seats');
+            $originalTotalSeats = $ride->available_seats + $bookedSeats;
+
+            // Calculate driver refund (5% of total ride value when created)
+            $totalRideValue = $ride->price_per_seat * $originalTotalSeats;
+            $driverRefundAmount = $totalRideValue * 0.05;
+
+            Log::info('Driver-initiated ride cancellation', [
+                'ride_id' => $ride->id,
+                'driver_id' => $user->id,
+                'confirmed_bookings' => $confirmedBookings->count(),
+                'booked_seats' => $bookedSeats,
+                'available_seats' => $ride->available_seats,
+                'original_total_seats' => $originalTotalSeats,
+                'total_ride_value' => $totalRideValue,
+                'total_passenger_refunds' => $totalPassengerRefunds,
+                'driver_refund_amount' => $driverRefundAmount,
+            ]);
+
+            // Process passenger refunds if any bookings exist
+            if ($totalPassengerRefunds > 0) {
+                $this->processDriverCancelledPassengerRefunds(
+                    $confirmedBookings,
+                    $ride,
+                    $totalPassengerRefunds
+                );
+            }
+
+            // Process driver refund if there was a creation fee
+            if ($driverRefundAmount > 0) {
+                $this->processDriverCancelledDriverRefund(
+                    $ride,
+                    $driverRefundAmount,
+                    $originalTotalSeats,
+                    $totalRideValue
+                );
+            }
+
+            // Mark all bookings as cancelled
+            foreach ($confirmedBookings as $booking) {
                 $booking->status = Booking::CANCELLED;
                 $booking->save();
             }
 
-            // 2. give seats back
-            $ride->available_seats += $bookings->sum('seats');
-            $ride->status          = 'cancelled';
+            // Update ride status - FIXED: Remove cancelled_at
+            $ride->available_seats = $originalTotalSeats; // Restore all seats
+            $ride->status = 'cancelled';
+            // REMOVED: $ride->cancelled_at = now(); // This column doesn't exist
             $ride->save();
 
-            // 3. notify passengers
-            foreach ($bookings as $booking) {
+            // Send notifications to all passengers
+            foreach ($confirmedBookings as $booking) {
+                $refundAmount = $booking->seats * $ride->price_per_seat;
+
                 $this->notificationService->createNotification(
                     $booking->user,
-                    'ride_cancelled',
-                    'Ride Cancelled',
-                    "The ride from {$ride->pickup_address} to {$ride->destination_address} was cancelled. Your refund is on the way.",
+                    'ride_cancelled_full_refund',
+                    'Ride Cancelled - Full Refund Processed',
+                    "The driver cancelled the ride from {$ride->pickup_address} to {$ride->destination_address}. " .
+                    "You have received a full refund of " . number_format($refundAmount, 0) . " SYP.",
                     [
-                        'ride_id'       => $ride->id,
-                        'booking_id'    => $booking->id,
-                        'refund_amount' => $booking->seats * $ride->price_per_seat,
+                        'ride_id' => $ride->id,
+                        'booking_id' => $booking->id,
+                        'refund_amount' => $refundAmount,
+                        'refund_type' => 'driver_cancelled',
+                        'pickup_address' => $ride->pickup_address,
+                        'destination_address' => $ride->destination_address,
+                        'departure_time' => $ride->departure_time->toISOString(),
                     ],
                     'high',
                     'ride'
                 );
             }
 
-            broadcast(new RideCancelled($ride, $bookings->toArray(), $user));
+            // Notify driver with appropriate message based on booking status
+            $driverNotificationMessage = $confirmedBookings->isEmpty()
+                ? "You cancelled your ride from {$ride->pickup_address} to {$ride->destination_address}. " .
+                "Your ride creation fee of " . number_format($driverRefundAmount, 0) . " SYP has been fully refunded since no passengers booked."
+                : "You cancelled your ride from {$ride->pickup_address} to {$ride->destination_address}. " .
+                "Your ride creation fee of " . number_format($driverRefundAmount, 0) . " SYP has been refunded, " .
+                "and all passengers received full refunds.";
+
+            $this->notificationService->createNotification(
+                $user,
+                'ride_cancelled_fee_refunded',
+                'Ride Cancelled - Creation Fee Refunded',
+                $driverNotificationMessage,
+                [
+                    'ride_id' => $ride->id,
+                    'driver_refund_amount' => $driverRefundAmount,
+                    'passengers_refunded' => $confirmedBookings->count(),
+                    'total_passenger_refunds' => $totalPassengerRefunds,
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'departure_time' => $ride->departure_time->toISOString(),
+                    'refund_type' => $refundType ?? 'standard',
+                ],
+                'normal',
+                'ride'
+            );
+
+            broadcast(new RideCancelled($ride, $confirmedBookings->toArray(), $user));
+
+            Log::info('Driver-initiated ride cancellation completed successfully', [
+                'ride_id' => $ride->id,
+                'driver_id' => $user->id,
+                'passengers_refunded' => $confirmedBookings->count(),
+                'total_passenger_refunds' => $totalPassengerRefunds,
+                'driver_refund' => $driverRefundAmount
+            ]);
 
             return response()->json([
                 'success' => true,
-                'data'    => $this->formatRideResponse($ride),
-                'message' => "Ride cancelled. {$bookings->count()} passenger(s) refunded.",
+                'data' => $this->formatRideResponse($ride),
+                'message' => "Ride cancelled successfully. {$confirmedBookings->count()} passenger(s) fully refunded and your ride creation fee has been refunded.",
+                'refund_summary' => [
+                    'passengers_refunded' => $confirmedBookings->count(),
+                    'total_passenger_refunds' => $totalPassengerRefunds,
+                    'driver_refund' => $driverRefundAmount,
+                    'refund_source_passengers' => 'Primary Admin (twisrmann)',
+                    'refund_source_driver' => 'SyCash'
+                ]
             ]);
         });
+    }
+
+    private function processDriverCancelledPassengerRefunds($confirmedBookings, $ride, $totalRefundAmount)
+    {
+        // Get primary admin wallet (twisrmann)
+        $primaryAdminConfig = AdminDashboardController::ADMIN_CONFIGS['primary'];
+        $primaryAdminWallet = Wallet::where('phone_number', $primaryAdminConfig['phone'])
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Verify primary admin has sufficient balance
+        if ($primaryAdminWallet->balance < $totalRefundAmount) {
+            throw new \Exception('Insufficient primary admin wallet balance for passenger refunds. Required: ' . number_format($totalRefundAmount, 2) . ', Available: ' . number_format($primaryAdminWallet->balance, 2));
+        }
+
+        $adminPreviousBalance = $primaryAdminWallet->balance;
+        $primaryAdminWallet->balance -= $totalRefundAmount;
+        $primaryAdminWallet->save();
+
+        $transactionId = 'DRIVER_CANCEL_REFUND_' . time() . '_' . Str::random(6);
+
+        // Create admin debit transaction
+        WalletTransaction::create([
+            'wallet_id' => $primaryAdminWallet->id,
+            'user_id' => $primaryAdminWallet->user_id,
+            'type' => 'driver_cancellation_refunds',
+            'amount' => -$totalRefundAmount,
+            'previous_balance' => $adminPreviousBalance,
+            'new_balance' => $primaryAdminWallet->balance,
+            'description' => "Passenger refunds for driver-cancelled ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'ADMIN_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'ride_id' => $ride->id,
+                'driver_id' => $ride->driver_id,
+                'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                'passengers_count' => $confirmedBookings->count(),
+                'total_refunded' => $totalRefundAmount,
+                'refund_reason' => 'driver_cancelled_ride',
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toDateTimeString(),
+            ]
+        ]);
+
+        // Process individual passenger refunds
+        foreach ($confirmedBookings as $booking) {
+            $passengerWallet = Wallet::where('user_id', $booking->user_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $refundAmount = $booking->seats * $ride->price_per_seat;
+            $passengerPreviousBalance = $passengerWallet->balance;
+
+            $passengerWallet->balance += $refundAmount;
+            $passengerWallet->save();
+
+            // Create passenger credit transaction
+            WalletTransaction::create([
+                'wallet_id' => $passengerWallet->id,
+                'user_id' => $passengerWallet->user_id,
+                'type' => 'driver_cancellation_refund',
+                'amount' => $refundAmount,
+                'previous_balance' => $passengerPreviousBalance,
+                'new_balance' => $passengerWallet->balance,
+                'description' => "Full refund for driver-cancelled ride - {$booking->seats} seat(s) from {$ride->pickup_address} to {$ride->destination_address}",
+                'transaction_id' => 'PASSENGER_' . $transactionId . '_' . $booking->id,
+                'status' => 'completed',
+                'metadata' => [
+                    'ride_id' => $ride->id,
+                    'booking_id' => $booking->id,
+                    'driver_id' => $ride->driver_id,
+                    'seats_refunded' => $booking->seats,
+                    'price_per_seat' => $ride->price_per_seat,
+                    'refund_reason' => 'driver_cancelled_ride',
+                    'pickup_address' => $ride->pickup_address,
+                    'destination_address' => $ride->destination_address,
+                    'departure_time' => $ride->departure_time->toDateTimeString(),
+                ]
+            ]);
+
+            Log::info('Passenger refund processed for driver-cancelled ride', [
+                'booking_id' => $booking->id,
+                'passenger_id' => $booking->user_id,
+                'refund_amount' => $refundAmount,
+                'new_balance' => $passengerWallet->balance
+            ]);
+        }
+
+        Log::info('All passenger refunds processed for driver-cancelled ride', [
+            'ride_id' => $ride->id,
+            'total_refunded' => $totalRefundAmount,
+            'passengers_count' => $confirmedBookings->count(),
+            'admin_balance_after' => $primaryAdminWallet->balance
+        ]);
+    }
+    private function processDriverCancelledDriverRefund($ride, $refundAmount, $originalSeats, $totalRidePrice)
+    {
+        // Get SyCash wallet
+        $syCashConfig = AdminDashboardController::ADMIN_CONFIGS['sycash'];
+        $syCashWallet = Wallet::where('phone_number', $syCashConfig['phone'])
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Get driver wallet
+        $driverWallet = Wallet::where('user_id', $ride->driver_id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        // Verify SyCash has sufficient balance for driver refund
+        if ($syCashWallet->balance < $refundAmount) {
+            throw new \Exception('Insufficient SyCash wallet balance for driver refund. Required: ' . number_format($refundAmount, 2) . ', Available: ' . number_format($syCashWallet->balance, 2));
+        }
+
+        // Store previous balances
+        $syCashPreviousBalance = $syCashWallet->balance;
+        $driverPreviousBalance = $driverWallet->balance;
+
+        // Process the refund
+        $syCashWallet->balance -= $refundAmount;
+        $driverWallet->balance += $refundAmount;
+
+        // Save wallets
+        $syCashWallet->save();
+        $driverWallet->save();
+
+        $transactionId = 'DRIVER_SELF_CANCEL_REFUND_' . time() . '_' . Str::random(6);
+
+        // SyCash transaction (debit)
+        WalletTransaction::create([
+            'wallet_id' => $syCashWallet->id,
+            'user_id' => $syCashWallet->user_id,
+            'type' => 'driver_self_cancellation_refund',
+            'amount' => -$refundAmount,
+            'previous_balance' => $syCashPreviousBalance,
+            'new_balance' => $syCashWallet->balance,
+            'description' => "Ride creation fee refund for driver-cancelled ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'SYCASH_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'ride_id' => $ride->id,
+                'driver_id' => $ride->driver_id,
+                'driver_name' => "{$ride->driver->first_name} {$ride->driver->last_name}",
+                'original_seats' => $originalSeats,
+                'total_ride_price' => $totalRidePrice,
+                'fee_percentage' => 5,
+                'refund_reason' => 'driver_self_cancelled',
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toDateTimeString(),
+            ]
+        ]);
+
+        // Driver transaction (credit)
+        WalletTransaction::create([
+            'wallet_id' => $driverWallet->id,
+            'user_id' => $driverWallet->user_id,
+            'type' => 'ride_creation_fee_refund',
+            'amount' => $refundAmount,
+            'previous_balance' => $driverPreviousBalance,
+            'new_balance' => $driverWallet->balance,
+            'description' => "Ride creation fee refund - Self-cancelled ride from {$ride->pickup_address} to {$ride->destination_address}",
+            'transaction_id' => 'DRIVER_' . $transactionId,
+            'status' => 'completed',
+            'metadata' => [
+                'ride_id' => $ride->id,
+                'original_seats' => $originalSeats,
+                'total_ride_price' => $totalRidePrice,
+                'fee_percentage' => 5,
+                'refund_reason' => 'self_cancelled_ride',
+                'pickup_address' => $ride->pickup_address,
+                'destination_address' => $ride->destination_address,
+                'departure_time' => $ride->departure_time->toDateTimeString(),
+            ]
+        ]);
+
+        Log::info('Driver refund processed for self-cancelled ride', [
+            'ride_id' => $ride->id,
+            'driver_id' => $ride->driver_id,
+            'refund_amount' => $refundAmount,
+            'calculation' => [
+                'price_per_seat' => $ride->price_per_seat,
+                'original_seats' => $originalSeats,
+                'total_ride_price' => $totalRidePrice,
+                'fee_percentage' => '5%',
+                'refund_calculated' => $refundAmount
+            ],
+            'balance_changes' => [
+                'sycash' => [
+                    'before' => $syCashPreviousBalance,
+                    'after' => $syCashWallet->balance,
+                    'change' => -$refundAmount
+                ],
+                'driver' => [
+                    'before' => $driverPreviousBalance,
+                    'after' => $driverWallet->balance,
+                    'change' => $refundAmount
+                ]
+            ]
+        ]);
     }
 
     /**
