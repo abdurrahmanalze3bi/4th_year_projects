@@ -4,21 +4,30 @@ namespace App\Http\Controllers\API;
 
 use App\Http\Controllers\Controller;
 use App\Interfaces\UserRepositoryInterface;
+use App\Services\JwtService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class SignupController extends Controller
 {
-    private $userRepository;
+    private UserRepositoryInterface $userRepository;
+    private JwtService $jwtService;
 
-    public function __construct(UserRepositoryInterface $userRepository)
-    {
+    public function __construct(
+        UserRepositoryInterface $userRepository,
+        JwtService $jwtService
+    ) {
         $this->userRepository = $userRepository;
+        $this->jwtService = $jwtService;
     }
 
     public function register(Request $request)
     {
-        $validatedData = $request->validate([
+        // Validate request
+        $validator = Validator::make($request->all(), [
             'first_name' => 'required|string|max:255',
             'last_name' => 'required|string|max:255',
             'email' => 'required|email|unique:users,email',
@@ -30,20 +39,36 @@ class SignupController extends Controller
             'password.confirmed' => 'Password confirmation does not match.'
         ]);
 
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        DB::beginTransaction();
+
         try {
+            // Create user
             $user = $this->userRepository->createUser([
-                'first_name' => $validatedData['first_name'],
-                'last_name' => $validatedData['last_name'],
-                'email' => $validatedData['email'],
-                'password' => Hash::make($validatedData['password']),
-                'gender' => $validatedData['gender'],
-                'address' => $validatedData['address'],
+                'first_name' => $request->first_name,
+                'last_name' => $request->last_name,
+                'email' => $request->email,
+                'password' => Hash::make($request->password),
+                'gender' => $request->gender,
+                'address' => $request->address,
                 'status' => 1
             ]);
 
-            $token = $user->createToken('auth-token')->plainTextToken;
+            // Generate JWT token pair
+            $tokens = $this->jwtService->generateTokenPair($user);
+
+            DB::commit();
 
             return response()->json([
+                'status' => 'success',
+                'message' => 'Registration successful',
                 'user' => [
                     'id' => $user->id,
                     'first_name' => $user->first_name,
@@ -54,14 +79,21 @@ class SignupController extends Controller
                     'status' => $user->status,
                     'created_at' => $user->created_at->toDateTimeString()
                 ],
-                'access_token' => $token,
-                'token_type' => 'Bearer'
+                'tokens' => $tokens
             ], 201);
 
         } catch (\Exception $e) {
+            DB::rollBack();
+
+            Log::error('Registration failed: ' . $e->getMessage(), [
+                'email' => $request->email,
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return response()->json([
+                'status' => 'error',
                 'message' => 'Registration failed',
-                'error' => $e->getMessage()
+                'error' => config('app.debug') ? $e->getMessage() : 'An error occurred during registration'
             ], 500);
         }
     }

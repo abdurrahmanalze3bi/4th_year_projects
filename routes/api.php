@@ -14,22 +14,14 @@ use App\Http\Controllers\API\LoginController;
 use App\Http\Controllers\API\LogoutController;
 use App\Http\Controllers\API\ForgotPasswordController;
 use App\Http\Controllers\API\ResetPasswordController;
+use App\Http\Controllers\API\RefreshTokenController;
 use App\Http\Controllers\API\ProfileController;
 use App\Http\Controllers\API\WalletController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
-/*
-|--------------------------------------------------------------------------
-| API Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register API routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "api" middleware group. Make something great!
-|
-*/
+/* |-------------------------------------------------------------------------- | API Routes |-------------------------------------------------------------------------- */
 
 // Database connection test route
 Route::get('test-db', function() {
@@ -62,19 +54,33 @@ Route::get('/test', function() {
 // OTP routes (public)
 Route::post('/otp/send', [OtpController::class, 'sendOtp']);
 Route::post('/otp/verify', [OtpController::class, 'verifyOtp']);
+
 Route::prefix('textme-otp')->group(function () {
     Route::post('/send', [TextMeOtpController::class, 'sendOtp']);
     Route::post('/verify', [TextMeOtpController::class, 'verifyOtp']);
 });
-// Authentication routes (public)
-Route::post('/signup', [SignupController::class, 'register']);
-Route::post('/login', [LoginController::class, '__invoke']);
-Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
-Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
-// Authenticated routes
-Route::middleware('auth:sanctum')->group(function () {
-    // User info
-    Route::get('/user', fn(Request $r) => $r->user());
+
+// ========================================
+// PUBLIC AUTHENTICATION ROUTES (JWT)
+// ========================================
+Route::prefix('auth')->group(function () {
+    Route::post('/signup', [SignupController::class, 'register']);
+    Route::post('/login', [LoginController::class, '__invoke']);
+    Route::post('/forgot-password', [ForgotPasswordController::class, '__invoke']);
+    Route::post('/reset-password', [ResetPasswordController::class, '__invoke']);
+    Route::post('/refresh', RefreshTokenController::class);
+});
+
+// ========================================
+// PROTECTED ROUTES (JWT AUTHENTICATION)
+// ========================================
+Route::middleware('jwt.auth')->group(function () {
+
+    // User info & logout
+    Route::get('/user', fn(Request $r) => response()->json([
+        'status' => 'success',
+        'user' => $r->user()
+    ]));
     Route::post('/logout', [LogoutController::class, '__invoke']);
 
     // Profile routes
@@ -88,10 +94,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{userId}/comments', [ProfileController::class, 'comment']);
         Route::post('/{userId}/rate', [ProfileController::class, 'rateUser']);
     });
+
+    // Booking routes
     Route::prefix('bookings')->group(function () {
         Route::post('/{bookingId}/cancel-seats', [RideController::class, 'cancelPartialSeats']);
     });
+
     Route::get('/my-bookings', [RideController::class, 'getMyBookings']);
+
     // Ride routes
     Route::prefix('rides')->group(function () {
         Route::post('/', [RideController::class, 'createRide']);
@@ -133,16 +143,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/bulk-action', [NotificationController::class, 'bulkAction']);
     });
 
-
-
-        // Wallet routes
+    // Wallet routes
     Route::prefix('wallet')->group(function () {
         Route::post('/initiate', [WalletController::class, 'initiateWalletCreation']);
         Route::post('/verify-and-create', [WalletController::class, 'verifyAndCreateWallet']);
         Route::get('/balance', [WalletController::class, 'getBalance']);
     });
-
-
-
-
 });
